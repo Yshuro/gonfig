@@ -13,6 +13,12 @@ func checkModeChangeable(_ string) error {
 	return nil
 }
 
+// asReadOnlyErr returns the error as it is, since other systems report read-only files with their own errors,
+// see isReadOnlyErr
+func asReadOnlyErr(err error) error {
+	return err
+}
+
 // keepOwner does nothing, since files on other systems, e.g. Windows, have no Unix owner to keep
 func keepOwner(_ string, _ fs.FileInfo) error {
 	return nil

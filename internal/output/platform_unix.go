@@ -60,9 +60,25 @@ func checkModeChangeable(target string) error {
 	return nil
 }
 
+// readOnlyMount is a variable, so tests can simulate a read-only mount
+var readOnlyMount = isReadOnlyMount
+
+// asReadOnlyErr returns a permission error of a file on a read-only mount as a read-only error with the same operation
+// and path. Linux checks the permissions of a file before the read-only flag of a bind mount, e.g. of a Kubernetes
+// ConfigMap, so a user without write permission gets EACCES instead of EROFS there. Permission errors on writable
+// mounts are returned as they are, since a file without write permission can still be replaced by a rename and its
+// owner may still change its mode.
+func asReadOnlyErr(err error) error {
+	var pathErr *fs.PathError
+	if !errors.Is(err, fs.ErrPermission) || !errors.As(err, &pathErr) || !readOnlyMount(pathErr.Path) {
+		return err
+	}
+	return &fs.PathError{Op: pathErr.Op, Path: pathErr.Path, Err: syscall.EROFS}
+}
+
 // isReadOnlyErr returns whether the error is caused by a read-only file system, e.g. a read-only bind mount or a
-// Kubernetes ConfigMap. Files without write permission are no read-only error, since they can still be replaced by a
-// rename if their directory is writable.
+// Kubernetes ConfigMap, see asReadOnlyErr for permission errors on them. Files without write permission are no
+// read-only error, since they can still be replaced by a rename if their directory is writable.
 func isReadOnlyErr(err error, _ fs.FileInfo) bool {
 	return errors.Is(err, syscall.EROFS)
 }

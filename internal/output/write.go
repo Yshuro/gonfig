@@ -309,7 +309,7 @@ func prepare(path string, data []byte, opts Options) (*pending, error) {
 			p.unchanged = true
 			// The mode of an unchanged file is still changed, so a read-only file fails before any file is changed as well
 			if opts.CheckWritable && p.changesMode() {
-				return p.checked(modeChangeable(p.target), existing)
+				return p.checked(asReadOnlyErr(modeChangeable(p.target)), existing)
 			}
 			return p, nil
 		}
@@ -380,7 +380,7 @@ func sameContent(target string, existing fs.FileInfo, data []byte) bool {
 func checkWritable(target string) error {
 	f, err := openWritable(target)
 	if err != nil {
-		return err
+		return asReadOnlyErr(err)
 	}
 	return f.Close()
 }
@@ -402,7 +402,7 @@ func (p *pending) updateMode() error {
 	if !p.changesMode() {
 		return nil
 	}
-	return chmod(p.target, p.opts.Mode)
+	return asReadOnlyErr(chmod(p.target, p.opts.Mode))
 }
 
 // writesInPlace returns whether commit writes the file in place instead of renaming a temporary file
@@ -493,13 +493,13 @@ func writeTempFile(tmp *os.File, data []byte, mode fs.FileMode) error {
 func writeInPlace(target string, data []byte, existing fs.FileInfo, opts Options) error {
 	// os.WriteFile also reports errors on closing the file, unlike a deferred Close
 	if err := writeFile(target, data, opts.Mode); err != nil {
-		return err
+		return asReadOnlyErr(err)
 	}
 
 	// A new file has been created as a regular file by WriteFile. Files that are not regular, e.g. named pipes, keep their mode.
 	if existing == nil || (opts.ForceMode && existing.Mode().IsRegular()) {
 		if err := chmod(target, opts.Mode); err != nil {
-			return errModeChange{err}
+			return errModeChange{asReadOnlyErr(err)}
 		}
 	}
 	return nil
