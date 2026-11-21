@@ -16,7 +16,7 @@ permissions:
 
 env:
   # renovate: datasource=go depName=golang.org/x/vuln
-  GOVULNCHECK_VERSION: v1.9.0
+  GOVULNCHECK_VERSION: v1.10.0
 
 jobs:
   # Fails only if gonfig calls vulnerable code. Vulnerabilities in imported packages and required modules
