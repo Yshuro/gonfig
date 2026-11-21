@@ -15,6 +15,7 @@ import (
 	"github.com/denglertai/gonfig/internal/file"
 	"github.com/denglertai/gonfig/internal/general"
 	"github.com/denglertai/gonfig/internal/logging"
+	"github.com/denglertai/gonfig/internal/schema"
 	"github.com/denglertai/gonfig/internal/value"
 )
 
@@ -369,6 +370,129 @@ func BenchmarkProcessYAMLScaling(b *testing.B) {
 				}
 				sampler.Stop(b)
 			})
+		}
+	}
+}
+
+// leafSchema accepts objects, arrays and integers at every level, so every string leaf is a violation
+const leafSchema = `{"$id": "leaf", "type": ["object", "array", "integer"], "additionalProperties": {"$ref": "#"}, "items": {"$ref": "#"}}`
+
+// keyScalingFormats are the formats of BenchmarkProcessKeysScaling, each generating n entries with keys that contain
+// placeholders. Every entry has a placeholder key with a string leaf, which is a violation of leafSchema.
+var keyScalingFormats = []struct {
+	name     string
+	fileType general.FileType
+	generate func(buf *bytes.Buffer, n int)
+}{
+	{"yaml/keys", general.YAML, func(buf *bytes.Buffer, n int) {
+		for i := range n {
+			fmt.Fprintf(buf, "svc${BENCH_ID}_%d:\n  host: ${BENCH_HOST}\n  \"opt_${BENCH_ID}\": x\n  port: %d\n", i, i)
+		}
+	}},
+	{"yaml/anchors", general.YAML, func(buf *bytes.Buffer, n int) {
+		// Every entry merges its own anchor, which holds placeholder keys
+		for i := range n {
+			fmt.Fprintf(buf, "base%d: &a%d\n  \"k${BENCH_ID}_%d\": x\n  host: ${BENCH_HOST}\n", i, i, i)
+			fmt.Fprintf(buf, "svc%d:\n  <<: *a%d\n  name: n%d\n", i, i, i)
+		}
+	}},
+	{"yaml/shared-anchor", general.YAML, func(buf *bytes.Buffer, n int) {
+		// One anchor with placeholder keys is aliased and merged by every entry
+		buf.WriteString("common: &common\n")
+		for i := range 10 {
+			fmt.Fprintf(buf, "  \"c${BENCH_ID}_%d\": x\n", i)
+		}
+		for i := range n {
+			fmt.Fprintf(buf, "svc%d:\n  <<: *common\n  alias: *common\n  \"own${BENCH_ID}\": x\n", i)
+		}
+	}},
+	{"json/keys", general.JSON, func(buf *bytes.Buffer, n int) {
+		buf.WriteString("{\n")
+		for i := range n {
+			if i > 0 {
+				buf.WriteString(",\n")
+			}
+			fmt.Fprintf(buf, `  "svc${BENCH_ID}_%d": {"host": "${BENCH_HOST}", "opt_${BENCH_ID}": "x", "port": %d}`, i, i)
+		}
+		buf.WriteString("\n}\n")
+	}},
+	{"toml/dotted", general.TOML, func(buf *bytes.Buffer, n int) {
+		for i := range n {
+			fmt.Fprintf(buf, "\"svc${BENCH_ID}_%d\".host = \"${BENCH_HOST}\"\n\"svc${BENCH_ID}_%d\".\"opt_${BENCH_ID}\" = \"x\"\n", i, i)
+		}
+	}},
+	{"toml/tables", general.TOML, func(buf *bytes.Buffer, n int) {
+		for i := range n {
+			fmt.Fprintf(buf, "[\"svc${BENCH_ID}_%d\"]\nhost = \"${BENCH_HOST}\"\n\"opt_${BENCH_ID}\" = \"x\"\n", i)
+		}
+	}},
+	{"toml/inline", general.TOML, func(buf *bytes.Buffer, n int) {
+		for i := range n {
+			fmt.Fprintf(buf, "svc%d = { \"k${BENCH_ID}\" = \"x\", host = \"${BENCH_HOST}\", n = { \"i${BENCH_ID}\" = \"x\" } }\n", i)
+		}
+	}},
+}
+
+// BenchmarkProcessKeysScaling processes files with n entries (1k, 4k and 16k) whose keys contain placeholders.
+// The "process" variants only process the file, the "schema" variants also validate the result against a schema that
+// every entry violates and redact the keys of the violations like config process --schema does.
+// 4x the entries should take about 4x the time (linear), about 16x is quadratic.
+func BenchmarkProcessKeysScaling(b *testing.B) {
+	for _, f := range keyScalingFormats {
+		for _, withSchema := range []bool{false, true} {
+			mode := "process"
+			if withSchema {
+				mode = "schema"
+			}
+
+			for _, n := range []int{1000, 4000, 16000} {
+				b.Run(fmt.Sprintf("%s/%s/%d", f.name, mode, n), func(b *testing.B) {
+					setEnv(b)
+					b.Setenv("BENCH_ID", "id-s3cret")
+
+					var buf bytes.Buffer
+					f.generate(&buf, n)
+					dir := b.TempDir()
+					path := filepath.Join(dir, "config."+string(f.fileType))
+					if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+						b.Fatal(err)
+					}
+
+					var sch *schema.Schema
+					if withSchema {
+						schemaPath := filepath.Join(dir, "leaf.json")
+						if err := os.WriteFile(schemaPath, []byte(leafSchema), 0o600); err != nil {
+							b.Fatal(err)
+						}
+						var err error
+						if sch, err = schema.Load(schemaPath); err != nil {
+							b.Fatal(err)
+						}
+					}
+
+					b.SetBytes(int64(buf.Len()))
+					b.ReportAllocs()
+					sampler := startHeapSampler()
+					for b.Loop() {
+						var out bytes.Buffer
+						processor := file.NewFileProcessor(path, f.fileType, &out)
+						if err := processor.Process(); err != nil {
+							b.Fatal(err)
+						}
+						if !withSchema {
+							continue
+						}
+						violations, err := sch.Validate(f.fileType, out.Bytes(), processor.RedactKeys)
+						if err != nil {
+							b.Fatal(err)
+						}
+						if len(violations) < n {
+							b.Fatalf("got %d violations, want at least %d", len(violations), n)
+						}
+					}
+					sampler.Stop(b)
+				})
+			}
 		}
 	}
 }
