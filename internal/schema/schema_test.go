@@ -1,8 +1,11 @@
 package schema
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/denglertai/gonfig/internal/filter"
@@ -148,6 +151,68 @@ func TestValidateErrors(t *testing.T) {
 	assert.EqualError(t, err, "files of type properties cannot be validated, only JSON, YAML, TOML, dotenv and INI files")
 }
 
+// madeUpSecret is a made-up processed value, which decode errors must not contain unless values are allowed in errors
+const madeUpSecret = "made-up-s3cret"
+
+// decodeErrorCases are contents of each format that cannot be decoded and quote the secret in the parser's message
+var decodeErrorCases = []struct {
+	fileType general.FileType
+	content  string
+	redacted string
+}{
+	{general.JSON, `{"a": "x"` + madeUpSecret + `}`, "invalid JSON at offset 10"},
+	{general.TOML, "a = 1\nb = " + madeUpSecret + "\n", "invalid TOML on line 2"},
+	{general.YAML, "a: 1\nb: [" + madeUpSecret + "\n", "invalid YAML on line 3"},
+	{general.YAML, "a: 1\nx: !!int " + madeUpSecret + "\n", "invalid YAML on line 2, a value does not match its tag !!int"},
+	{general.YAML, "a: 1\n---\nb:\n  c: !!bool " + madeUpSecret + "\n", "invalid YAML on line 4, a value does not match its tag !!bool"},
+	{general.YML, "x: !!timestamp " + madeUpSecret + "\n", "invalid YAML on line 1, a value does not match its tag !!timestamp"},
+}
+
+// TestDecodeErrorsWithoutValues checks that decode errors name the format and location but not the content
+func TestDecodeErrorsWithoutValues(t *testing.T) {
+	s := writeSchema(t, `{}`)
+
+	for _, c := range decodeErrorCases {
+		_, err := s.Validate(c.fileType, []byte(c.content))
+		assert.EqualError(t, err, c.redacted, c.content)
+		assert.NotContains(t, err.Error(), madeUpSecret)
+	}
+}
+
+// TestDecodeErrorsWithValues checks that decode errors wrap the parser's error if values are allowed in errors
+func TestDecodeErrorsWithValues(t *testing.T) {
+	allowValuesInErrors(t)
+	s := writeSchema(t, `{}`)
+
+	for _, c := range decodeErrorCases {
+		_, err := s.Validate(c.fileType, []byte(c.content))
+		parserError := errors.Unwrap(err)
+		if assert.NotNil(t, parserError, c.content) {
+			format, _, _ := strings.Cut(c.redacted[len("invalid "):], " ")
+			assert.EqualError(t, err, "invalid "+format+": "+parserError.Error(), c.content)
+		}
+	}
+
+	// The parser's message of a value that doesn't match its tag quotes the value
+	_, err := s.Validate(general.YAML, []byte("x: !!int "+madeUpSecret+"\n"))
+	assert.ErrorContains(t, err, madeUpSecret)
+}
+
+// TestTagMismatch checks the search for values that don't match their explicit tag, which YAML errors have no line for
+func TestTagMismatch(t *testing.T) {
+	line, tag := tagMismatch([]byte("a: !!str 1\nb: !!int 2\nc: !!float abc\n"))
+	assert.Equal(t, 3, line)
+	assert.Equal(t, "!!float", tag)
+
+	line, _ = tagMismatch([]byte("a: !!int 1\nb: !custom abc\n"))
+	assert.Zero(t, line)
+
+	line, _ = tagMismatch([]byte("a: [\n"))
+	assert.Zero(t, line)
+
+	assert.Empty(t, yamlLocation([]byte("a: 1\n"), assert.AnError))
+}
+
 // TestRegisterDecoder checks that registered decoders validate their file type, with their errors returned
 func TestRegisterDecoder(t *testing.T) {
 	const fileType general.FileType = "test"
@@ -253,4 +318,74 @@ func TestLoadErrors(t *testing.T) {
 	assert.ErrorContains(t, err, "missing-ref.json")
 	_, err = Load(filepath.Join(dir, "none.json"))
 	assert.ErrorContains(t, err, "failed to load the schema: open ")
+}
+
+// TestTagMismatchLocations checks the line reported for values that don't match their explicit tag in different
+// positions of the content, and that valid or ignored tags are not reported
+func TestTagMismatchLocations(t *testing.T) {
+	s := writeSchema(t, `{}`)
+	const secret = madeUpSecret
+	mismatch := func(line int, tag string) string {
+		return "invalid YAML on line " + strconv.Itoa(line) + ", a value does not match its tag " + tag
+	}
+
+	for _, c := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"flow mapping", "a: 1\nb: {x: !!int " + secret + "}\n", mismatch(2, "!!int")},
+		{"flow sequence", "a: [1,\n  !!float " + secret + "]\n", mismatch(2, "!!float")},
+		{"block sequence", "a:\n  - 1\n  - !!bool " + secret + "\n", mismatch(3, "!!bool")},
+		{"nested", "a:\n  b:\n    - c: !!timestamp " + secret + "\n", mismatch(3, "!!timestamp")},
+		{"after valid tagged value", "a: !!int 1\nb: !!float 1.5\nc: !!bool true\nd: !!null ~\ne: !!int " + secret + "\n", mismatch(5, "!!int")},
+		{"null", "a: !!null " + secret + "\n", mismatch(1, "!!null")},
+		{"anchor", "a: &x !!int " + secret + "\nb: *x\n", mismatch(1, "!!int")},
+		{"CRLF", "a: 1\r\nb: !!int " + secret + "\r\n", mismatch(2, "!!int")},
+		{"BOM", "\ufeffa: 1\nb: !!int " + secret + "\n", mismatch(2, "!!int")},
+		{"comments and blank lines", "# c\n\na: 1 # x\n\nb: !!int " + secret + "\n", mismatch(5, "!!int")},
+		{"second document", "a: 1\n---\nb: 2\n---\nc: !!int " + secret + "\n", mismatch(5, "!!int")},
+		{"multiline value", "a: |\n  x\n  y\nb: !!int " + secret + "\n", mismatch(4, "!!int")},
+		{"first of two", "a: !!int " + secret + "\nb: !!int " + secret + "\n", mismatch(1, "!!int")},
+	} {
+		_, err := s.Validate(general.YAML, []byte(c.content))
+		assert.EqualError(t, err, c.want, c.name)
+	}
+
+	// Values that match their tag, ignored tags and tags the parser doesn't resolve are not decode errors
+	for _, content := range []string{
+		"a: !!int 12\nb: !!float 1e3\nc: !!bool true\nd: !!null null\ne: !!timestamp 2024-01-02\n",
+		"a: !!str " + secret + "\nb: !custom " + secret + "\n",
+		"a: !!int 1\n---\nb: !!str 2\n",
+		"a: &x !!int 1\nb: *x\n",
+	} {
+		_, err := s.Validate(general.YAML, []byte(content))
+		assert.NoError(t, err, content)
+	}
+}
+
+// TestTagMismatchKeys documents that explicit tags on keys are searched as well as tags on values
+func TestTagMismatchKeys(t *testing.T) {
+	line, tag := tagMismatch([]byte("a: 1\n!!int " + madeUpSecret + ": 1\n"))
+	assert.Equal(t, 2, line)
+	assert.Equal(t, "!!int", tag)
+
+	line, tag = tagMismatch([]byte("{!!int " + madeUpSecret + ": 1}\n"))
+	assert.Equal(t, 1, line)
+	assert.Equal(t, "!!int", tag)
+}
+
+// TestTagMismatchNoFalsePositives checks that values the parser accepts for their tag are not reported
+func TestTagMismatchNoFalsePositives(t *testing.T) {
+	s := writeSchema(t, `{}`)
+	for _, content := range []string{
+		"a: !!bool true\nb: !!bool False\nc: !!int 0x1F\nd: !!int 0o17\ne: !!int 1_000\nf: !!float .inf\ng: !!float .nan\nh: !!int -5\n",
+		"a: !!timestamp 2024-01-02T03:04:05Z\nb: !!timestamp 2024-01-02 03:04:05\nc: !!null \"\"\nd: !!null\n",
+		"a: !!int '7'\nb: !!float \"1.5\"\nc: !!bool 'true'\n",
+	} {
+		_, err := s.Validate(general.YAML, []byte(content))
+		assert.NoError(t, err, content)
+		line, _ := tagMismatch([]byte(content))
+		assert.Zero(t, line, content)
+	}
 }

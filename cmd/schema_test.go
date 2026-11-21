@@ -10,6 +10,7 @@ import (
 	"testing/iotest"
 
 	"github.com/denglertai/gonfig/internal/file"
+	"github.com/denglertai/gonfig/internal/filter"
 	"github.com/denglertai/gonfig/internal/general"
 	"github.com/denglertai/gonfig/internal/schema"
 	"github.com/stretchr/testify/assert"
@@ -174,7 +175,8 @@ func TestCheckSchemaErrors(t *testing.T) {
 	output, err := runCheck(t, "database: {host: a, port: 1}\ndatabase: {host: b, port: 2}\n", "--schema", configSchemaPath(t))
 	assert.EqualError(t, err, "check failed: 0 missing variables, 1 error")
 	assert.Contains(t, output, "error: failed to validate ")
-	assert.Contains(t, output, `mapping key "database" already defined`)
+	// The parser's message is only included with --log-values, since it may quote processed values
+	assert.Contains(t, output, "config.yaml: invalid YAML on line 2\n")
 
 	sch, err := schema.Load(configSchemaPath(t))
 	assert.NoError(t, err)
@@ -387,4 +389,65 @@ func TestSchemaDotenvAndIni(t *testing.T) {
 	assert.Contains(t, out, `  schema: database: missing property 'host'
   schema: database.port: value does not match pattern '^[0-9]+$'
 `)
+}
+
+// secretTagContent is a file whose processed value does not match its tag, so the YAML parser quotes the value
+const secretTagContent = "a: 1\nx: !!int ${SCHEMA_TEST_PW}\n"
+
+// madeUpPassword is a made-up secret that must not appear in decode errors unless --log-values is set
+const madeUpPassword = "made-up-pw-s3cret"
+
+// runSchemaSecret runs the command on secretTagContent and returns everything it printed with the error
+func runSchemaSecret(t *testing.T, command string, args ...string) string {
+	t.Helper()
+	t.Setenv("SCHEMA_TEST_PW", madeUpPassword)
+	t.Setenv("GONFIG_LOG_VALUES", "")
+	t.Cleanup(func() {
+		file.SetLogValues(false)
+		filter.SetValuesInErrors(false)
+	})
+
+	fileName := filepath.Join(t.TempDir(), "config.yaml")
+	assert.NoError(t, os.WriteFile(fileName, []byte(secretTagContent), 0o644))
+
+	var out, errOut bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&errOut)
+	t.Cleanup(func() { rootCmd.SetOut(nil); rootCmd.SetErr(nil) })
+	resetFlags(t)
+	rootCmd.SetArgs(append([]string{"config", command, "-f", fileName, "--schema", configSchemaPath(t)}, args...))
+	err := rootCmd.Execute()
+	assert.Error(t, err)
+
+	written, readErr := os.ReadFile(fileName)
+	assert.NoError(t, readErr)
+	assert.Equal(t, secretTagContent, string(written), "the file must not be changed")
+	return out.String() + errOut.String() + err.Error()
+}
+
+// TestSchemaDecodeErrorsHideValues checks that values of files that cannot be decoded for the validation don't leak
+// through process and check, in text and JSON reports and with --diff, unless --log-values is set
+func TestSchemaDecodeErrorsHideValues(t *testing.T) {
+	const redacted = "invalid YAML on line 2, a value does not match its tag !!int"
+
+	for _, tc := range []struct {
+		name    string
+		command string
+		args    []string
+	}{
+		{"process", "process", []string{"-i"}},
+		{"check", "check", nil},
+		{"check json", "check", []string{"-o", "json"}},
+		{"check diff", "check", []string{"--diff"}},
+		{"check diff json", "check", []string{"--diff", "-o", "json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := runSchemaSecret(t, tc.command, tc.args...)
+			assert.Contains(t, output, redacted)
+			assert.NotContains(t, output, madeUpPassword)
+
+			output = runSchemaSecret(t, tc.command, append([]string{"--log-values"}, tc.args...)...)
+			assert.Contains(t, output, madeUpPassword)
+		})
+	}
 }

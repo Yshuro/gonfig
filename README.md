@@ -573,6 +573,22 @@ database:
 - **Several files:** every file is validated against the same schema, and all files are validated before any is written, so a single violation leaves all files unchanged. To validate files against different schemas, map them to their schemas as described [below](#different-schemas-per-file).
 - **Schemas:** any draft supported by the [validator](https://github.com/santhosh-tekuri/jsonschema), 2020-12 if `$schema` is not set. `$ref`s to other schema files are resolved relative to the schema file. Remote schemas are never fetched, so a `$ref` to an `http(s)` URL fails, except for the meta-schemas of json-schema.org, which are built in. `format` is asserted, e.g. `"format": "email"` rejects strings that are no email address.
 - **Values in messages:** values may be secrets, so messages name the failed requirement without the value, e.g. `value does not match pattern '^.{12,}$'`. Enable [`log-values`](#logging-notes) to include them.
+- **Decode errors:** if the processed content cannot be decoded, the parser's message is left out, since it may quote values. The error names the format and, if known, the line or offset in the processed content, which differs from the input file if a fragment spans several lines (see it with `config check --diff`), e.g. `invalid YAML on line 1, a value does not match its tag !!int`, `invalid JSON at offset 12` or `invalid TOML on line 3`. With `log-values`, the parser's message follows the format, e.g. `invalid YAML: <parser message>`.
+
+`app.yaml`:
+```yaml
+x: !!int ${PW}
+```
+
+`app.schema.json`:
+```json
+{ "type": "object", "properties": { "x": { "type": "integer" } } }
+```
+
+```console
+$ PW=hunter2secret gonfig config process -f app.yaml --schema app.schema.json
+Error: failed to validate app.yaml against the schema app.schema.json: invalid YAML on line 1, a value does not match its tag !!int
+```
 
 ##### Different schemas per file
 
@@ -873,7 +889,7 @@ Order of precedence (highest to lowest):
 | Include source location | `--log-source`, `-s` | `GONFIG_LOG_SOURCE` | `false` | Includes source location in log output |
 | Config directory | `--config-path` | `GONFIG_CONFIG_PATH` | empty | Directory that contains `.gonfig.yaml` |
 | Plugin directory | `--plugin-path` | `GONFIG_PLUGIN_PATH` | `/usr/libexec/gonfig/plugins` (except on Windows) and `./plugins` | Directory scanned recursively for executable plugins (`gonfig-plugin-*`) and deprecated Go plugins (`.so` files). If set, only this directory is scanned |
-| Log values | `--log-values` | `GONFIG_LOG_VALUES` | `false` | Includes processed values in debug logs, error messages of filters, the parser messages of invalid fragments and the diff of `config check --diff`. Values may contain secrets, so only use it for debugging; gonfig warns on startup while it is enabled |
+| Log values | `--log-values` | `GONFIG_LOG_VALUES` | `false` | Includes processed values in debug logs, error messages of filters, the parser messages of invalid fragments, the parser messages of files that cannot be decoded for schema validation and the diff of `config check --diff`. Values may contain secrets, so only use it for debugging; gonfig warns on startup while it is enabled |
 | Fail on missing variables | `--fail-on-missing` | `GONFIG_FAIL_ON_MISSING` | `false` | Fails for [environment variables that are not set](./FILTERS.md#missing-variables) instead of using empty strings, unless the placeholder provides a default |
 | Ignore write errors | `--ignore-write-errors` (`config process` only) | `GONFIG_IGNORE_WRITE_ERRORS` | empty | Comma-separated kinds of errors writing files back with `-i` that skip the file with a warning instead of failing. Only `read-only` is supported, see [unchanged and read-only files](#unchanged-and-read-only-files). Has no effect without `-i` |
 | Allow unknown filters | `--allow-unknown-filters` | `GONFIG_ALLOW_UNKNOWN_FILTERS` | `false` | Passes values on unchanged with a warning instead of failing for [unknown filters](./FILTERS.md#order-of-operations). This may write secrets that were meant to be hashed or encrypted |

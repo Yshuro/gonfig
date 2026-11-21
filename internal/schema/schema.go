@@ -4,6 +4,7 @@ package schema
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -209,7 +210,12 @@ func decode(fileType general.FileType, data []byte) ([]any, error) {
 	case general.JSON:
 		document, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
 		if err != nil {
-			return nil, err
+			location := ""
+			var syntaxError *json.SyntaxError
+			if errors.As(err, &syntaxError) {
+				location = fmt.Sprintf(" at offset %d", syntaxError.Offset)
+			}
+			return nil, decodeError("JSON", location, err)
 		}
 		return []any{document}, nil
 	case general.YAML, general.YML:
@@ -222,7 +228,7 @@ func decode(fileType general.FileType, data []byte) ([]any, error) {
 				break
 			}
 			if err != nil {
-				return nil, err
+				return nil, decodeError("YAML", yamlLocation(data, err), err)
 			}
 			documents = append(documents, normalize(document))
 		}
@@ -234,7 +240,14 @@ func decode(fileType general.FileType, data []byte) ([]any, error) {
 	case general.TOML:
 		var document map[string]any
 		if err := toml.Unmarshal(data, &document); err != nil {
-			return nil, err
+			location := ""
+			var tomlError *toml.DecodeError
+			if errors.As(err, &tomlError) {
+				if row, _ := tomlError.Position(); row > 0 {
+					location = " on line " + strconv.Itoa(row)
+				}
+			}
+			return nil, decodeError("TOML", location, err)
 		}
 		return []any{normalize(document)}, nil
 	default:
@@ -246,6 +259,66 @@ func decode(fileType general.FileType, data []byte) ([]any, error) {
 			return []any{document}, nil
 		}
 		return nil, fmt.Errorf("files of type %s cannot be validated, only JSON, YAML, TOML, dotenv and INI files", fileType)
+	}
+}
+
+// decodeError returns the error of content that cannot be decoded, e.g. "invalid YAML on line 2". The messages of the
+// parsers may quote processed values, e.g. "cannot construct !!str `s3cret` as a !!int" for a placeholder after a tag,
+// so they are only included if values are allowed in errors, see filter.SetValuesInErrors. The location, e.g.
+// " on line 2", never contains parts of the content.
+func decodeError(format string, location string, err error) error {
+	if filter.ValuesInErrors() {
+		return fmt.Errorf("invalid %s: %w", format, err)
+	}
+	return fmt.Errorf("invalid %s%s", format, location)
+}
+
+// yamlLocation returns the location of the YAML error for decodeError, e.g. " on line 2". Errors of the parser
+// have a line, but errors of values that don't match their explicit tag, e.g. "!!int abc", have none, so the first
+// such value is searched, see tagMismatch. Decoding fails at the first such value, so it is the cause of an error
+// without a line. It returns an empty location if neither is found.
+func yamlLocation(data []byte, err error) string {
+	var loadError *yaml.LoadError
+	if errors.As(err, &loadError) && loadError.Mark.Line > 0 {
+		return " on line " + strconv.Itoa(loadError.Mark.Line)
+	}
+	if line, tag := tagMismatch(data); line > 0 {
+		return fmt.Sprintf(" on line %d, a value does not match its tag %s", line, tag)
+	}
+	return ""
+}
+
+// mismatchTags are the explicit tags whose values are resolved and fail to decode if they don't match, e.g. "!!int abc"
+var mismatchTags = []string{"!!int", "!!float", "!!bool", "!!null", "!!timestamp"}
+
+// tagMismatch returns the line and the tag of the first scalar in the documents of the content whose explicit tag
+// it does not match, or 0 if there is none. It is only called after decoding failed, so it may parse again.
+func tagMismatch(data []byte) (int, string) {
+	var find func(node *yaml.Node) (int, string)
+	find = func(node *yaml.Node) (int, string) {
+		if node.Kind == yaml.ScalarNode && node.Style&yaml.TaggedStyle != 0 && slices.Contains(mismatchTags, node.ShortTag()) {
+			var value any
+			if node.Decode(&value) != nil {
+				return node.Line, node.ShortTag()
+			}
+		}
+		for _, child := range node.Content {
+			if line, tag := find(child); line > 0 {
+				return line, tag
+			}
+		}
+		return 0, ""
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	for {
+		var document yaml.Node
+		if decoder.Decode(&document) != nil {
+			return 0, ""
+		}
+		if line, tag := find(&document); line > 0 {
+			return line, tag
+		}
 	}
 }
 
