@@ -8,6 +8,6 @@ import "io/fs"
 const modeBits = fs.ModePerm
 
 // isReadOnlyErr returns false, since other systems, e.g. WebAssembly, report no read-only errors gonfig can detect
-func isReadOnlyErr(_ error, _ fs.FileInfo) bool {
+func isReadOnlyErr(_ error, _ string) bool {
 	return false
 }

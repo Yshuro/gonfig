@@ -248,16 +248,17 @@ func TestCheckModeChangeable(t *testing.T) {
 	assert.NoError(t, checkModeChangeable(path))
 	assertMode(t, path, 0o640)
 
-	err := checkModeChangeable(filepath.Join(dir, "missing"))
+	missing := filepath.Join(dir, "missing")
+	err := checkModeChangeable(missing)
 	assert.ErrorIs(t, err, fs.ErrNotExist)
-	assert.ErrorContains(t, err, "access "+filepath.Join(dir, "missing"))
-	assert.False(t, isReadOnlyErr(err, nil))
+	assert.ErrorContains(t, err, "access "+missing)
+	assert.False(t, isReadOnlyErr(err, missing))
 
 	if os.Getuid() != 0 {
 		require.NoError(t, os.Chmod(path, 0o444))
 		err = checkModeChangeable(path)
 		assert.ErrorIs(t, err, fs.ErrPermission)
-		assert.False(t, isReadOnlyErr(err, nil), "the owner may change the mode of a file without write permission")
+		assert.False(t, isReadOnlyErr(err, path), "the owner may change the mode of a file without write permission")
 	}
 }
 
@@ -278,7 +279,7 @@ func TestSameContentSkipsNamedPipes(t *testing.T) {
 	// Without O_NONBLOCK, opening a pipe without a reader for writing blocks; with it, it fails with ENXIO
 	err = checkWritable(pipe)
 	assert.ErrorIs(t, err, syscall.ENXIO)
-	assert.False(t, isReadOnlyErr(err, info), "the pipe is written as before")
+	assert.False(t, isReadOnlyErr(err, pipe), "the pipe is written as before")
 }
 
 // TestWriteAllFailsBeforeWritingReadOnlyFiles checks that a read-only file fails before any file is changed
@@ -389,7 +390,7 @@ func TestWriteAllKeepsReplacingFilesWithoutWritePermission(t *testing.T) {
 
 // TestIsReadOnlyErr checks that only EROFS is a read-only error on Unix, not a missing permission
 func TestIsReadOnlyErr(t *testing.T) {
-	assert.True(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: "a", Err: syscall.EROFS}, nil))
-	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: "a", Err: syscall.EACCES}, nil))
-	assert.False(t, isReadOnlyErr(nil, nil))
+	assert.True(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: "a", Err: syscall.EROFS}, "a"))
+	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: "a", Err: syscall.EACCES}, "a"))
+	assert.False(t, isReadOnlyErr(nil, "a"))
 }

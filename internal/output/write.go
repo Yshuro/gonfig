@@ -309,7 +309,7 @@ func prepare(path string, data []byte, opts Options) (*pending, error) {
 			p.unchanged = true
 			// The mode of an unchanged file is still changed, so a read-only file fails before any file is changed as well
 			if opts.CheckWritable && p.changesMode() {
-				return p.checked(asReadOnlyErr(modeChangeable(p.target)), existing)
+				return p.checked(asReadOnlyErr(modeChangeable(p.target)))
 			}
 			return p, nil
 		}
@@ -317,7 +317,7 @@ func prepare(path string, data []byte, opts Options) (*pending, error) {
 			return p, nil
 		}
 		if opts.CheckWritable {
-			checked, err := p.checked(checkWritable(p.target), existing)
+			checked, err := p.checked(checkWritable(p.target))
 			if err != nil || checked.skip != nil {
 				return checked, err
 			}
@@ -344,8 +344,8 @@ func prepare(path string, data []byte, opts Options) (*pending, error) {
 // checked returns the result of checking whether the file can be written: the error of a read-only file, or the file
 // marked as skipped with IgnoreReadOnly. Other errors are ignored, since writing the file may still succeed,
 // e.g. replacing a file without write permission by a rename.
-func (p *pending) checked(err error, existing fs.FileInfo) (*pending, error) {
-	if err == nil || !isReadOnlyErr(err, existing) {
+func (p *pending) checked(err error) (*pending, error) {
+	if err == nil || !isReadOnlyErr(err, p.target) {
 		return p, nil
 	}
 	if !p.opts.IgnoreReadOnly {
@@ -387,7 +387,7 @@ func checkWritable(target string) error {
 
 // ignoresReadOnly returns whether the error is a read-only error that is ignored, see Options.IgnoreReadOnly
 func (p *pending) ignoresReadOnly(err error) bool {
-	return p.opts.IgnoreReadOnly && !p.special && isReadOnlyErr(err, p.existing)
+	return p.opts.IgnoreReadOnly && !p.special && isReadOnlyErr(err, p.target)
 }
 
 // changesMode returns whether the mode of an unchanged file is changed, i.e. ForceMode sets another mode of a regular file.

@@ -79,6 +79,6 @@ func asReadOnlyErr(err error) error {
 // isReadOnlyErr returns whether the error is caused by a read-only file system, e.g. a read-only bind mount or a
 // Kubernetes ConfigMap, see asReadOnlyErr for permission errors on them. Files without write permission are no
 // read-only error, since they can still be replaced by a rename if their directory is writable.
-func isReadOnlyErr(err error, _ fs.FileInfo) bool {
+func isReadOnlyErr(err error, _ string) bool {
 	return errors.Is(err, syscall.EROFS)
 }

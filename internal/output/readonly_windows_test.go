@@ -39,21 +39,16 @@ func TestIsReadOnlyErrWindows(t *testing.T) {
 
 	roInfo, err := os.Stat(readOnly)
 	require.NoError(t, err)
-	rwInfo, err := os.Stat(writable)
-	require.NoError(t, err)
 	assert.Zero(t, roInfo.Mode().Perm()&0o200, "the read-only attribute has no write bit")
 
 	// Opening the file for writing fails like the writable check of WriteAll
 	_, openErr := os.OpenFile(readOnly, os.O_WRONLY, 0)
 	require.Error(t, openErr)
-	assert.True(t, isReadOnlyErr(openErr, roInfo))
-	// isReadOnlyErr checks the file named by the error again, so these errors name the file of each case
-	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: writable, Err: fs.ErrPermission}, rwInfo),
-		"a writable file has no read-only error")
-	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: filepath.Join(dir, "new.yaml"), Err: fs.ErrPermission}, nil),
-		"a new file has no read-only error")
-	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: readOnly, Err: fs.ErrNotExist}, roInfo))
-	assert.False(t, isReadOnlyErr(nil, roInfo))
+	assert.True(t, isReadOnlyErr(openErr, readOnly))
+	assert.False(t, isReadOnlyErr(fs.ErrPermission, writable), "a writable file has no read-only error")
+	assert.False(t, isReadOnlyErr(fs.ErrPermission, filepath.Join(dir, "new.yaml")), "a missing file has no read-only error")
+	assert.False(t, isReadOnlyErr(fs.ErrNotExist, readOnly))
+	assert.False(t, isReadOnlyErr(nil, readOnly))
 }
 
 // TestWriteAllWindowsReadOnlyAttribute checks that WriteAll skips a file with the read-only attribute with a warning
@@ -169,21 +164,24 @@ func TestWriteAllWindowsModeOfUnchangedFiles(t *testing.T) {
 	}
 }
 
-// TestIsReadOnlyErrWindowsAttributeSetLater checks that a permission error is a read-only error if the attribute was set
-// after the file info was read, and that the file info is used if the file cannot be checked again
-func TestIsReadOnlyErrWindowsAttributeSetLater(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "a.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("a: 1\n"), 0o644))
-	writableInfo, err := os.Stat(path)
-	require.NoError(t, err)
+// TestPendingWindowsReadOnlyChecksCurrentMode checks the classification used after a write fails.
+func TestPendingWindowsReadOnlyChecksCurrentMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.yaml")
 	windowsReadOnlyFile(t, path, "a: 1\n")
-	readOnlyInfo, err := os.Stat(path)
+	info, err := os.Stat(path)
 	require.NoError(t, err)
+	p := &pending{target: path, existing: info, opts: windowsWriteOptions(true)}
+	writeErr := &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
 
-	assert.True(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}, writableInfo))
+	assert.True(t, p.ignoresReadOnly(writeErr))
+	require.NoError(t, os.Chmod(path, 0o666))
+	assert.False(t, p.ignoresReadOnly(writeErr), "the read-only attribute was cleared after preparation")
+	require.NoError(t, os.Remove(path))
+	assert.False(t, p.ignoresReadOnly(writeErr), "the old mode cannot classify an error for a missing file")
 
-	missing := filepath.Join(dir, "missing")
-	assert.True(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: missing, Err: fs.ErrPermission}, readOnlyInfo))
-	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: missing, Err: fs.ErrPermission}, writableInfo))
+	require.NoError(t, os.WriteFile(path, []byte("a: 1\n"), 0o666))
+	p.existing, err = os.Stat(path)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(path, 0o444))
+	assert.True(t, p.ignoresReadOnly(writeErr), "the read-only attribute was set after preparation")
 }

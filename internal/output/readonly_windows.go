@@ -15,17 +15,11 @@ const modeBits fs.FileMode = 0o200
 // isReadOnlyErr returns whether the error is caused by the read-only attribute of the file, which Go reports as a
 // missing write permission. Windows has no error of its own for it, so other permission errors of files with the
 // attribute are treated as read-only errors as well.
-// The file is checked again, since the attribute may have been set after existing was read. If that fails, existing
-// is used.
-func isReadOnlyErr(err error, existing fs.FileInfo) bool {
+// Check the current mode because the attribute may have changed since the file was prepared.
+func isReadOnlyErr(err error, target string) bool {
 	if !errors.Is(err, fs.ErrPermission) {
 		return false
 	}
-	var pathErr *fs.PathError
-	if errors.As(err, &pathErr) {
-		if current, statErr := os.Stat(pathErr.Path); statErr == nil {
-			existing = current
-		}
-	}
-	return existing != nil && existing.Mode().Perm()&0o200 == 0
+	info, statErr := os.Stat(target)
+	return statErr == nil && info.Mode().Perm()&modeBits == 0
 }
