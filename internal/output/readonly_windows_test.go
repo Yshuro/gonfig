@@ -47,8 +47,11 @@ func TestIsReadOnlyErrWindows(t *testing.T) {
 	_, openErr := os.OpenFile(readOnly, os.O_WRONLY, 0)
 	require.Error(t, openErr)
 	assert.True(t, isReadOnlyErr(openErr, roInfo))
-	assert.False(t, isReadOnlyErr(openErr, rwInfo), "a writable file has no read-only error")
-	assert.False(t, isReadOnlyErr(openErr, nil), "a new file has no read-only error")
+	// isReadOnlyErr checks the file named by the error again, so these errors name the file of each case
+	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: writable, Err: fs.ErrPermission}, rwInfo),
+		"a writable file has no read-only error")
+	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: filepath.Join(dir, "new.yaml"), Err: fs.ErrPermission}, nil),
+		"a new file has no read-only error")
 	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: readOnly, Err: fs.ErrNotExist}, roInfo))
 	assert.False(t, isReadOnlyErr(nil, roInfo))
 }
