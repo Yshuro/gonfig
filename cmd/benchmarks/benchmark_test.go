@@ -447,6 +447,11 @@ func BenchmarkProcessKeysScaling(b *testing.B) {
 
 			for _, n := range []int{1000, 4000, 16000} {
 				b.Run(fmt.Sprintf("%s/%s/%d", f.name, mode, n), func(b *testing.B) {
+					if withSchema && f.name == "yaml/shared-anchor" && n == 16000 {
+						// The aliases expand to more than yaml's decoder accepts, so validation fails with
+						// "invalid YAML" before any key is redacted, on main as well
+						b.Skip("the expanded document exceeds the alias limit of the YAML decoder")
+					}
 					setEnv(b)
 					b.Setenv("BENCH_ID", "id-s3cret")
 
@@ -476,6 +481,8 @@ func BenchmarkProcessKeysScaling(b *testing.B) {
 					for b.Loop() {
 						var out bytes.Buffer
 						processor := file.NewFileProcessor(path, f.fileType, &out)
+						// Keys are only recorded for redaction if the output is validated, like config process --schema
+						processor.Validated = withSchema
 						if err := processor.Process(); err != nil {
 							b.Fatal(err)
 						}

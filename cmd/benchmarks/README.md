@@ -189,26 +189,35 @@ The plugin is started once per run of gonfig, so its startup time is added once,
 
 ### Keys with placeholders (#438)
 
-Keys produced by placeholders are masked in schema violations, which records the keys while processing and locates them
-when a violation is reported (`BenchmarkProcessKeysScaling`). JSON keys are located during processing, which frees
-the parsed document before it is written and costs process-only runs of JSON files with placeholder keys about 8 to 12%
-more time than locating them lazily. Compared to main (6 runs each), processing without a schema allocates 1 to 3% (YAML anchors) up to 5 to 8%
-(YAML keys, JSON, TOML) more and takes at most a few percent longer, with 4 times the entries taking 3.8 to 4.0 times
-the time for YAML and JSON. Violations add 3 to 15% more allocations and about 5 to 36% more time (JSON and shared YAML
-anchors the most). The time and allocations of the redaction grow linearly with the entries.
+Keys produced by placeholders are masked in schema violations (`BenchmarkProcessKeysScaling`). The processor only
+records and locates keys if its output is validated (`FileProcessor.Validated`, set by `config process --schema` and
+`config check`). Compared to main (6 runs each):
+
+- Without a schema, processing allocates exactly the same (B/op and allocs/op) for all formats, and the peak heap is
+  unchanged. Times are within the noise (YAML, YAML anchors, shared anchors, TOML inline and dotted), TOML tables take
+  3 to 6% longer. Only `json/keys/16000` is 20% slower (148 vs 177 ms, reproduced with 10 runs), while 1000 and 4000
+  entries are not significantly different and allocations are identical.
+- With a schema, the input is read fully, the keys of the input and of fragments are recorded and the keys produced by
+  placeholders are located when a violation is reported. This costs 11 to 21% more time for YAML keys and anchors, 34 to
+  51% for JSON, 31 to 45% for TOML and 42 to 45% for YAML with shared anchors. Allocations grow by 23 to 26% (33 to 34% for
+  shared anchors) and B/op by 13 to 28%.
+- Scaling is the same as on main: with a schema, 4 times the entries take 4.1 to 4.7 times the time for JSON and 4.4 for
+  shared YAML anchors, 5.0 and 8.1 times for YAML keys (5.4 and 7.9 on main) and 6.6 and 9.8 times for YAML anchors
+  (7.1 and 9.4 on main). Without a schema, YAML takes 3.6 to 4.1 times and JSON 4.4 to 5.2 times.
 
 Peak heap (main to branch, `-count=6`):
 
-- Files without key placeholders are unchanged: `yaml/static` 93.4 vs 94.4 MiB, `json/static` 27.7 vs 27.8 MiB,
-  `toml/placeholders` 20.0 vs 20.2 MiB (not significant).
-- With key placeholders and no schema, `json/keys` grows by 13% (4000 and 16000 entries) and `toml/dotted` by 23%
-  (4000) and 9% (16000).
-- With a schema, `json/keys` grows by 15% and 22% (4000 and 16000 entries) and `toml/dotted` by 25% and 20%. Keeping the
-  parsed document until a violation is reported would about double it.
+- Files without key placeholders are unchanged: `yaml/static` 94.4 vs 94.0 MiB, `json/static` 27.8 vs 27.9 MiB,
+  `toml/placeholders` 20.2 vs 20.3 MiB (not significant).
+- With key placeholders and no schema, the peak heap is unchanged for all formats and sizes.
+- With a schema, it grows by 4 to 5% for YAML keys (not significant at 16000 entries) and by 13 to 16% for shared
+  anchors, by 16%, 22% and 30% for `json/keys` (1000, 4000 and 16000 entries), by 8 to 14% (1000 entries) up to 31 to 44%
+  (16000) for the TOML variants.
 
 The benchmark also shows behavior that exists on main as well: TOML files with many top-level tables or dotted keys scale
 quadratically (7.5 to 12 times per 4 times the entries, 1.1 to 2.1 s for 16,000 entries, tracked in [#444](https://github.com/denglertai/gonfig/issues/444)), because the TOML library
 checks every key against all its siblings (`SeenTracker.find` of go-toml) while reading and again while checking renamed
 keys when writing. The 1 MiB TOML benchmarks use an array of tables, which does not trigger it. Validating YAML with
-aliases that expand to a large document (`yaml/shared-anchor/schema/16000`) fails to decode on main and on the branch.
+aliases that expand to a large document (`yaml/shared-anchor/schema/16000`) exceeds the alias limit of the YAML decoder on
+main and on the branch, so that combination is skipped.
 Validation of YAML with anchors takes 6.9 and 10 times per step already on main.
