@@ -572,8 +572,36 @@ database:
 - **File types:** JSON, YAML, TOML, dotenv and INI files. Every document of a YAML file is validated, and violations name the document, e.g. `document 2: database.port`. XML, properties and plain text files are rejected before any file is processed. TOML dates and times are validated as strings. Dotenv files are validated as an object of strings, and INI files as an object of sections, which are objects of strings, besides the keys before the first section.
 - **Several files:** every file is validated against the same schema, and all files are validated before any is written, so a single violation leaves all files unchanged. To validate files against different schemas, map them to their schemas as described [below](#different-schemas-per-file).
 - **Schemas:** any draft supported by the [validator](https://github.com/santhosh-tekuri/jsonschema), 2020-12 if `$schema` is not set. `$ref`s to other schema files are resolved relative to the schema file. Remote schemas are never fetched, so a `$ref` to an `http(s)` URL fails, except for the meta-schemas of json-schema.org, which are built in. `format` is asserted, e.g. `"format": "email"` rejects strings that are no email address.
-- **Values in messages:** values may be secrets, so messages name the failed requirement without the value, e.g. `value does not match pattern '^.{12,}$'`. Enable [`log-values`](#logging-notes) to include them.
+- **Values in messages:** values may be secrets, so messages name the failed requirement without the value, e.g. `value does not match pattern '^.{12,}$'`, and lengths show only the limit of the schema, e.g. `length must be >= 12`. Keys made up by placeholders are masked like in `config check --diff`, e.g. `additional properties '***' not allowed` or `***.v: value must be >= 100`, and a part of a key outside the placeholder stays visible, e.g. `pre_***`. A processed key is masked where it ends up in the processed document, and a static key that is equal is masked only if both end up at the same place (e.g. a merge override), so `token` in `token: 1` stays visible next to `sub: {${KEY}: 2}` with `KEY=token`. Messages of `dependentRequired` and `dependencies` mask the processed key too, e.g. `properties 'pw' required, if '***' exists`. `required` can reveal a processed key indirectly: the `missing property` violation disappears if a processed key equals the required name. If gonfig cannot determine where keys ended up (e.g. a very large number of YAML alias expansions), all keys in the violations are masked. Counts like `minItems` and the indices of `uniqueItems` are shown. Enable [`log-values`](#logging-notes) to include the values, the real keys and the actual lengths, e.g. `minLength: got 5, want 12`.
 - **Decode errors:** if the processed content cannot be decoded, the parser's message is left out, since it may quote values. The error names the format and, if known, the line or offset in the processed content, which differs from the input file if a fragment spans several lines (see it with `config check --diff`), e.g. `invalid YAML on line 1, a value does not match its tag !!int`, `invalid JSON at offset 12` or `invalid TOML on line 3`. With `log-values`, the parser's message follows the format, e.g. `invalid YAML: <parser message>`.
+
+The keys of a violation are masked, so the example reveals neither the name made up by `KEY` nor the length of `NAME`:
+
+`keys.schema.json`:
+```json
+{
+  "type": "object",
+  "properties": { "name": { "type": "string", "minLength": 12 } },
+  "additionalProperties": false
+}
+```
+
+`keys.yaml`:
+```yaml
+name: ${NAME}
+${KEY}: 1
+```
+
+```console
+$ NAME=short KEY=api_token gonfig config process -f keys.yaml --schema keys.schema.json
+Error: keys.yaml does not match the schema keys.schema.json:
+  - (root): additional properties '***' not allowed
+  - name: length must be >= 12
+$ NAME=short KEY=api_token gonfig config process -f keys.yaml --schema keys.schema.json --log-values
+Error: keys.yaml does not match the schema keys.schema.json:
+  - (root): additional properties 'api_token' not allowed
+  - name: minLength: got 5, want 12
+```
 
 `app.yaml`:
 ```yaml
@@ -889,7 +917,7 @@ Order of precedence (highest to lowest):
 | Include source location | `--log-source`, `-s` | `GONFIG_LOG_SOURCE` | `false` | Includes source location in log output |
 | Config directory | `--config-path` | `GONFIG_CONFIG_PATH` | empty | Directory that contains `.gonfig.yaml` |
 | Plugin directory | `--plugin-path` | `GONFIG_PLUGIN_PATH` | `/usr/libexec/gonfig/plugins` (except on Windows) and `./plugins` | Directory scanned recursively for executable plugins (`gonfig-plugin-*`) and deprecated Go plugins (`.so` files). If set, only this directory is scanned |
-| Log values | `--log-values` | `GONFIG_LOG_VALUES` | `false` | Includes processed values in debug logs, error messages of filters, the parser messages of invalid fragments, the parser messages of files that cannot be decoded for schema validation and the diff of `config check --diff`. Values may contain secrets, so only use it for debugging; gonfig warns on startup while it is enabled |
+| Log values | `--log-values` | `GONFIG_LOG_VALUES` | `false` | Includes processed values in debug logs, the keys and lengths in the violations of schema validation, error messages of filters, the parser messages of invalid fragments, the parser messages of files that cannot be decoded for schema validation and the diff of `config check --diff`. Values may contain secrets, so only use it for debugging; gonfig warns on startup while it is enabled |
 | Fail on missing variables | `--fail-on-missing` | `GONFIG_FAIL_ON_MISSING` | `false` | Fails for [environment variables that are not set](./FILTERS.md#missing-variables) instead of using empty strings, unless the placeholder provides a default |
 | Ignore write errors | `--ignore-write-errors` (`config process` only) | `GONFIG_IGNORE_WRITE_ERRORS` | empty | Comma-separated kinds of errors writing files back with `-i` that skip the file with a warning instead of failing. Only `read-only` is supported, see [unchanged and read-only files](#unchanged-and-read-only-files). Has no effect without `-i` |
 | Allow unknown filters | `--allow-unknown-filters` | `GONFIG_ALLOW_UNKNOWN_FILTERS` | `false` | Passes values on unchanged with a warning instead of failing for [unknown filters](./FILTERS.md#order-of-operations). This may write secrets that were meant to be hashed or encrypted |
