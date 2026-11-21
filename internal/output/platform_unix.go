@@ -48,6 +48,18 @@ func syncDir(dir string) {
 	}
 }
 
+// checkModeChangeable returns a read-only error if the mode of the file cannot be changed since it is on a read-only
+// file system, without changing anything. It checks write access, which reports EROFS for read-only file systems and
+// mounts; other errors, e.g. a missing write permission, don't keep the owner from changing the mode and are ignored
+// by the caller.
+func checkModeChangeable(target string) error {
+	const writeOK = 2 // W_OK of access(2), which package syscall doesn't define
+	if err := syscall.Access(target, writeOK); err != nil {
+		return &fs.PathError{Op: "access", Path: target, Err: err}
+	}
+	return nil
+}
+
 // isReadOnlyErr returns whether the error is caused by a read-only file system, e.g. a read-only bind mount or a
 // Kubernetes ConfigMap. Files without write permission are no read-only error, since they can still be replaced by a
 // rename if their directory is writable.

@@ -126,13 +126,13 @@ func TestWriteAllModeOfReadOnlyUnchangedFiles(t *testing.T) {
 			unchanged := filepath.Join(dir, "c.yaml")
 			changedInfo := writeOld(t, changed, "a: ${A}\n")
 			unchangedInfo := writeOld(t, unchanged, "c: 1\n")
-			chmod = func(name string, mode fs.FileMode) error {
+			modeChangeable = func(name string) error {
 				if name == unchanged {
-					return &fs.PathError{Op: "chmod", Path: name, Err: syscall.EROFS}
+					return &fs.PathError{Op: "access", Path: name, Err: syscall.EROFS}
 				}
-				return os.Chmod(name, mode)
+				return checkModeChangeable(name)
 			}
-			t.Cleanup(func() { chmod = os.Chmod })
+			t.Cleanup(func() { modeChangeable = checkModeChangeable })
 
 			opts := inlineOptions
 			opts.ForceMode, opts.IgnoreReadOnly = true, ignore
@@ -149,7 +149,7 @@ func TestWriteAllModeOfReadOnlyUnchangedFiles(t *testing.T) {
 				assert.NotContains(t, logs.String(), "made-up-secret")
 			} else {
 				assert.ErrorIs(t, err, syscall.EROFS)
-				assert.Contains(t, err.Error(), "failed to change the mode of "+unchanged+", no file has been changed: chmod ")
+				assert.Contains(t, err.Error(), "failed to change the mode of "+unchanged+", no file has been changed: access ")
 				assertUntouched(t, changed, "a: ${A}\n", changedInfo)
 			}
 			assertUntouched(t, unchanged, "c: 1\n", unchangedInfo)
@@ -170,7 +170,7 @@ func TestWriteAllModeOfUnchangedFilesBecomingReadOnly(t *testing.T) {
 			other := filepath.Join(dir, "b.yaml")
 			writeOld(t, unchanged, "a: 1\n")
 			otherInfo := writeOld(t, other, "b: ${B}\n")
-			// Setting the current mode while checking succeeds, setting the requested mode fails
+			// The check succeeds, setting the requested mode fails
 			chmod = func(name string, mode fs.FileMode) error {
 				if name == unchanged && mode == 0o600 {
 					return &fs.PathError{Op: "chmod", Path: name, Err: syscall.EROFS}
@@ -198,6 +198,66 @@ func TestWriteAllModeOfUnchangedFilesBecomingReadOnly(t *testing.T) {
 			}
 			assertNoLeftovers(t, dir)
 		})
+	}
+}
+
+// TestWriteAllModeChangeFailsAfterWritingInPlace checks that a file written in place whose mode then cannot be set,
+// e.g. as the file system was remounted read-only, counts as written: with IgnoreReadOnly only the mode change is
+// skipped with a warning, without it the error names the file as written
+func TestWriteAllModeChangeFailsAfterWritingInPlace(t *testing.T) {
+	for _, ignore := range []bool{true, false} {
+		t.Run(map[bool]string{true: "ignored", false: "failing"}[ignore], func(t *testing.T) {
+			logs := captureLogs(t)
+			dir := resolvedTempDir(t)
+			path := filepath.Join(dir, "a.yaml")
+			writeOld(t, path, "a: ${A}\n")
+			rename = func(_, _ string) error { return syscall.EBUSY }
+			chmod = func(name string, _ fs.FileMode) error {
+				return &fs.PathError{Op: "chmod", Path: name, Err: syscall.EROFS}
+			}
+			t.Cleanup(func() { rename, chmod = os.Rename, os.Chmod })
+
+			opts := inlineOptions
+			opts.ForceMode, opts.IgnoreReadOnly = true, ignore
+			err := WriteAll([]File{{Path: path, Data: []byte("a: made-up-secret\n"), Options: opts}})
+			if ignore {
+				require.NoError(t, err)
+				assert.Contains(t, logs.String(), `"level":"WARN","msg":"Skipping mode change of read-only file","path":"`+path+`","mode":"0600","error":"read-only file system"`)
+				assert.NotContains(t, logs.String(), `"msg":"Skipping read-only file"`)
+				assert.NotContains(t, logs.String(), "made-up-secret")
+			} else {
+				assert.ErrorIs(t, err, syscall.EROFS)
+				assert.EqualError(t, err, "failed to change the mode of "+path+" (written: "+path+"): chmod "+path+": read-only file system")
+			}
+			content, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, "a: made-up-secret\n", string(content), "the content has been written")
+			assertMode(t, path, 0o640)
+			assertNoLeftovers(t, dir)
+		})
+	}
+}
+
+// TestCheckModeChangeable checks that checking whether the mode can be changed changes nothing and reports errors
+// of access, which are no read-only errors for a missing file or a file without write permission
+func TestCheckModeChangeable(t *testing.T) {
+	dir := resolvedTempDir(t)
+	path := filepath.Join(dir, "a.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("a: 1\n"), 0o640))
+
+	assert.NoError(t, checkModeChangeable(path))
+	assertMode(t, path, 0o640)
+
+	err := checkModeChangeable(filepath.Join(dir, "missing"))
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+	assert.ErrorContains(t, err, "access "+filepath.Join(dir, "missing"))
+	assert.False(t, isReadOnlyErr(err, nil))
+
+	if os.Getuid() != 0 {
+		require.NoError(t, os.Chmod(path, 0o444))
+		err = checkModeChangeable(path)
+		assert.ErrorIs(t, err, fs.ErrPermission)
+		assert.False(t, isReadOnlyErr(err, nil), "the owner may change the mode of a file without write permission")
 	}
 }
 

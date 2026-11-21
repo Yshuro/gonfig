@@ -479,7 +479,7 @@ $ DB_HOST=db.internal gonfig config process -i --ignore-write-errors=read-only -
 {"time":"...","level":"WARN","msg":"Skipping read-only file","path":"ro/app.yaml","error":"read-only file system"}
 ```
 
-The same applies to the mode change of an unchanged file with `--mode`: it is checked before anything is written as well, and fails on a read-only file with `failed to change the mode of ro/done.yaml, no file has been changed: chmod ro/done.yaml: read-only file system`. With `ignore-write-errors=read-only`, it is skipped with a separate warning and the exit code stays `0`:
+The same applies to the mode change of an unchanged file with `--mode`: it is checked before anything is written as well, and fails on a read-only file with `failed to change the mode of ro/done.yaml, no file has been changed: access ro/done.yaml: read-only file system`. With `ignore-write-errors=read-only`, it is skipped with a separate warning and the exit code stays `0`:
 
 ```text
 $ DB_HOST=db.internal gonfig config process -i --mode 0600 --ignore-write-errors=read-only -f 'ro/done.yaml'

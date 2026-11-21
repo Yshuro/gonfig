@@ -7,6 +7,12 @@ import "io/fs"
 // nonBlock is no flag on other systems, e.g. Windows, which have no named pipes in the file system that could block
 const nonBlock = 0
 
+// checkModeChangeable returns nil, since the mode of a file can be changed on other systems, e.g. on Windows even with
+// the read-only attribute, which changing the mode clears
+func checkModeChangeable(_ string) error {
+	return nil
+}
+
 // keepOwner does nothing, since files on other systems, e.g. Windows, have no Unix owner to keep
 func keepOwner(_ string, _ fs.FileInfo) error {
 	return nil

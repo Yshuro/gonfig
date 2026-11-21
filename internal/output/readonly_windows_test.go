@@ -165,3 +165,22 @@ func TestWriteAllWindowsModeOfUnchangedFiles(t *testing.T) {
 		})
 	}
 }
+
+// TestIsReadOnlyErrWindowsAttributeSetLater checks that a permission error is a read-only error if the attribute was set
+// after the file info was read, and that the file info is used if the file cannot be checked again
+func TestIsReadOnlyErrWindowsAttributeSetLater(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("a: 1\n"), 0o644))
+	writableInfo, err := os.Stat(path)
+	require.NoError(t, err)
+	windowsReadOnlyFile(t, path, "a: 1\n")
+	readOnlyInfo, err := os.Stat(path)
+	require.NoError(t, err)
+
+	assert.True(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}, writableInfo))
+
+	missing := filepath.Join(dir, "missing")
+	assert.True(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: missing, Err: fs.ErrPermission}, readOnlyInfo))
+	assert.False(t, isReadOnlyErr(&fs.PathError{Op: "open", Path: missing, Err: fs.ErrPermission}, writableInfo))
+}
