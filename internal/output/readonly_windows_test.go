@@ -164,7 +164,9 @@ func TestWriteAllWindowsModeOfUnchangedFiles(t *testing.T) {
 	}
 }
 
-// TestPendingWindowsReadOnlyChecksCurrentMode checks the classification used after a write fails.
+// TestPendingWindowsReadOnlyChecksCurrentMode checks that a permission error is ignored as a read-only error depending
+// on the current read-only attribute of the target, not on its attribute when it was prepared, and not for a removed
+// target
 func TestPendingWindowsReadOnlyChecksCurrentMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "a.yaml")
 	windowsReadOnlyFile(t, path, "a: 1\n")
