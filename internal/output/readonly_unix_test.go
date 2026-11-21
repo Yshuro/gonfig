@@ -41,6 +41,16 @@ func readOnlyFile(t *testing.T, readOnly string) {
 	t.Cleanup(func() { openWritable = openWritableFile })
 }
 
+// resolvedTempDir returns a temporary directory with symbolic links resolved. Files are opened, written and their modes set
+// by their resolved paths, so tests replacing these functions compare against resolved paths, e.g. on macOS, where
+// temporary directories are below /var, a symbolic link to /private/var
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	return dir
+}
+
 // writeOld writes the old content of a file with an mtime in the past, so a rewrite would change it
 func writeOld(t *testing.T, path string, content string) fs.FileInfo {
 	t.Helper()
@@ -67,7 +77,7 @@ func assertUntouched(t *testing.T, path string, content string, before fs.FileIn
 // TestWriteAllSkipsUnchangedFiles checks that files without changed values or with equal content are not written,
 // while changed files are
 func TestWriteAllSkipsUnchangedFiles(t *testing.T) {
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	noValues := filepath.Join(dir, "compact.json")
 	equal := filepath.Join(dir, "equal.yaml")
 	changed := filepath.Join(dir, "changed.yaml")
@@ -94,7 +104,7 @@ func TestWriteAllSkipsUnchangedFiles(t *testing.T) {
 
 // TestWriteAllChangesModeOfUnchangedFiles checks that --mode changes the mode of an unchanged file without writing it
 func TestWriteAllChangesModeOfUnchangedFiles(t *testing.T) {
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	path := filepath.Join(dir, "app.yaml")
 	before := writeOld(t, path, "a: 1\n")
 
@@ -111,7 +121,7 @@ func TestWriteAllModeOfReadOnlyUnchangedFiles(t *testing.T) {
 	for _, ignore := range []bool{true, false} {
 		t.Run(map[bool]string{true: "ignored", false: "failing"}[ignore], func(t *testing.T) {
 			logs := captureLogs(t)
-			dir := t.TempDir()
+			dir := resolvedTempDir(t)
 			changed := filepath.Join(dir, "a.yaml")
 			unchanged := filepath.Join(dir, "c.yaml")
 			changedInfo := writeOld(t, changed, "a: ${A}\n")
@@ -155,7 +165,7 @@ func TestWriteAllModeOfUnchangedFilesBecomingReadOnly(t *testing.T) {
 	for _, ignore := range []bool{true, false} {
 		t.Run(map[bool]string{true: "ignored", false: "failing"}[ignore], func(t *testing.T) {
 			logs := captureLogs(t)
-			dir := t.TempDir()
+			dir := resolvedTempDir(t)
 			unchanged := filepath.Join(dir, "a.yaml")
 			other := filepath.Join(dir, "b.yaml")
 			writeOld(t, unchanged, "a: 1\n")
@@ -194,7 +204,7 @@ func TestWriteAllModeOfUnchangedFilesBecomingReadOnly(t *testing.T) {
 // TestSameContentSkipsNamedPipes checks that a named pipe swapped in for a regular file since it was checked is not
 // read, which would block without a writer
 func TestSameContentSkipsNamedPipes(t *testing.T) {
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	regular := filepath.Join(dir, "a.yaml")
 	require.NoError(t, os.WriteFile(regular, []byte("a: 1\n"), 0o600))
 	info, err := os.Stat(regular)
@@ -213,7 +223,7 @@ func TestSameContentSkipsNamedPipes(t *testing.T) {
 
 // TestWriteAllFailsBeforeWritingReadOnlyFiles checks that a read-only file fails before any file is changed
 func TestWriteAllFailsBeforeWritingReadOnlyFiles(t *testing.T) {
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	writable := filepath.Join(dir, "a.yaml")
 	readOnly := filepath.Join(dir, "b.yaml")
 	writableInfo := writeOld(t, writable, "a: ${A}\n")
@@ -236,7 +246,7 @@ func TestWriteAllFailsBeforeWritingReadOnlyFiles(t *testing.T) {
 // and the OS error, and writes the other files
 func TestWriteAllSkipsReadOnlyFiles(t *testing.T) {
 	logs := captureLogs(t)
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	writable := filepath.Join(dir, "a.yaml")
 	readOnly := filepath.Join(dir, "b.yaml")
 	writeOld(t, writable, "a: ${A}\n")
@@ -264,7 +274,7 @@ func TestWriteAllSkipsReadOnlyFiles(t *testing.T) {
 func TestWriteAllSkipsFilesBecomingReadOnly(t *testing.T) {
 	for _, ignore := range []bool{true, false} {
 		t.Run(map[bool]string{true: "ignored", false: "failing"}[ignore], func(t *testing.T) {
-			dir := t.TempDir()
+			dir := resolvedTempDir(t)
 			atomic := filepath.Join(dir, "a.yaml")
 			inPlace := filepath.Join(dir, "b.yaml")
 			writeOld(t, atomic, "a: ${A}\n")
@@ -306,7 +316,7 @@ func TestWriteAllSkipsFilesBecomingReadOnly(t *testing.T) {
 // TestWriteAllKeepsReplacingFilesWithoutWritePermission checks that a file without write permission in a writable
 // directory is still replaced, since that is no read-only error
 func TestWriteAllKeepsReplacingFilesWithoutWritePermission(t *testing.T) {
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	path := filepath.Join(dir, "app.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("a: ${A}\n"), 0o444))
 
