@@ -3,12 +3,19 @@
 package output
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 )
+
+// modeBits are the permission bits os.Chmod applies, which are all of them on Unix
+const modeBits = fs.ModePerm
+
+// nonBlock opens files without blocking, e.g. a named pipe without a reader or writer, which has no effect on regular files
+const nonBlock = syscall.O_NONBLOCK
 
 // isSpecialPath returns whether the path refers to a special file like /dev/stdout or /proc/self/fd/1,
 // which are written in place without resolving their links
@@ -39,4 +46,39 @@ func syncDir(dir string) {
 		_ = d.Sync()
 		_ = d.Close()
 	}
+}
+
+// checkModeChangeable returns a read-only error if the mode of the file cannot be changed since it is on a read-only
+// file system, without changing anything. It checks write access, which reports EROFS for read-only file systems and
+// mounts; other errors, e.g. a missing write permission, don't keep the owner from changing the mode and are ignored
+// by the caller.
+func checkModeChangeable(target string) error {
+	const writeOK = 2 // W_OK of access(2), which package syscall doesn't define
+	if err := syscall.Access(target, writeOK); err != nil {
+		return &fs.PathError{Op: "access", Path: target, Err: err}
+	}
+	return nil
+}
+
+// readOnlyMount is a variable, so tests can simulate a read-only mount
+var readOnlyMount = isReadOnlyMount
+
+// asReadOnlyErr returns a permission error of a file on a read-only mount as a read-only error with the same operation
+// and path. Linux checks the permissions of a file before the read-only flag of a bind mount, e.g. of a Kubernetes
+// ConfigMap, so a user without write permission gets EACCES instead of EROFS there. Permission errors on writable
+// mounts are returned as they are, since a file without write permission can still be replaced by a rename and its
+// owner may still change its mode.
+func asReadOnlyErr(err error) error {
+	var pathErr *fs.PathError
+	if !errors.Is(err, fs.ErrPermission) || !errors.As(err, &pathErr) || !readOnlyMount(pathErr.Path) {
+		return err
+	}
+	return &fs.PathError{Op: pathErr.Op, Path: pathErr.Path, Err: syscall.EROFS}
+}
+
+// isReadOnlyErr returns whether the error is caused by a read-only file system, e.g. a read-only bind mount or a
+// Kubernetes ConfigMap, see asReadOnlyErr for permission errors on them. Files without write permission are no
+// read-only error, since they can still be replaced by a rename if their directory is writable.
+func isReadOnlyErr(err error, _ string) bool {
+	return errors.Is(err, syscall.EROFS)
 }
