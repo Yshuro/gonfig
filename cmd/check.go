@@ -116,7 +116,7 @@ func validateChecked(report *file.CheckReport, processor *file.FileProcessor, sc
 	}
 
 	for _, sch := range schemas {
-		violations, err := sch.Validate(processor.FileType, processed.Bytes())
+		violations, err := sch.Validate(processor.FileType, processed.Bytes(), processor.RedactKeys)
 		if err != nil {
 			report.Error = fmt.Sprintf("failed to validate %s: %v", report.File, err)
 			return

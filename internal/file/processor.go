@@ -64,6 +64,15 @@ type FileProcessor struct {
 	format textFormat
 	// changed is set once processing changed a value, see Changed
 	changed bool
+	// keyCandidates are the entries processed during Process that are or may be used as keys, with their masked text,
+	// see recordKeyCandidate. They are only kept until writing, and keyLocator keeps what is needed to locate them
+	// until RedactKeys locates them, see keyLocatorOf.
+	keyCandidates map[ConfigEntry]string
+	keyLocator    keyLocator
+	// keys are the locations of the keys produced by placeholders during the last Process, see RedactKeys. keysUnsure
+	// is set if they could not be located for sure, so every key is masked.
+	keys       keyLocations
+	keysUnsure bool
 }
 
 // NewFileProcessor creates a new file processor
@@ -101,6 +110,7 @@ func NewFileProcessor(fileName string, fileType general.FileType, output io.Writ
 // If any value fails to process, nothing is written.
 func (fp *FileProcessor) Process() error {
 	fp.changed = false
+	fp.keyCandidates, fp.keyLocator, fp.keys, fp.keysUnsure = nil, nil, nil, false
 	handler, entries, err := fp.read()
 	if err != nil {
 		return err
@@ -112,9 +122,13 @@ func (fp *FileProcessor) Process() error {
 		}
 	}
 
+	locator := fp.keyLocatorOf(handler)
 	if err := fp.write(handler, fp.Output); err != nil {
 		return fmt.Errorf("failed to write %s: %w", fp.FileName, err)
 	}
+	// Locating the keys may take long for YAML documents with many aliases, so it is only done for violations, after
+	// the validator decoded the content, see RedactKeys
+	fp.keyLocator = locator
 
 	return nil
 }
@@ -335,6 +349,8 @@ func (fp *FileProcessor) applyEntry(entry ConfigEntry, current string, allowFrag
 		fp.changed = true
 		return fp.insertFragment(entry, fragment, allowFragments, fileGroup)
 	}
+
+	fp.recordKeyCandidate(entry, current)
 
 	newText, ok := newVal.(string)
 	if !ok {

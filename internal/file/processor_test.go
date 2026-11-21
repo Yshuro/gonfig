@@ -461,3 +461,47 @@ func TestFileProcessorInputReadError(t *testing.T) {
 		assert.ErrorContains(t, err, assert.AnError.Error())
 	}
 }
+
+// TestFileProcessorRedactKeys checks that keys produced by placeholders are masked by their location for every file
+// type with keys as entries, while static keys, keys of fragments and values are kept, and that Process forgets the
+// keys of earlier runs
+func TestFileProcessorRedactKeys(t *testing.T) {
+	t.Setenv("REDACT_TEST_SECRET", "made-up-s3cret")
+
+	testCases := []struct {
+		fileType general.FileType
+		content  string
+		fragment string
+		empty    string
+	}{
+		{fileType: general.YAML, content: "${REDACT_TEST_SECRET}: 1\na:\n  pre_${REDACT_TEST_SECRET}:\n    b: 2\n" +
+			"static: ${REDACT_TEST_SECRET}\nf: ${REDACT_TEST_FRAGMENT | fragment}\n", fragment: "{fragment-key: 1}", empty: "{}\n"},
+		{fileType: general.JSON, content: `{"${REDACT_TEST_SECRET}": 1, "a": {"pre_${REDACT_TEST_SECRET}": {"b": 2}}, ` +
+			`"static": "${REDACT_TEST_SECRET}", "f": "${REDACT_TEST_FRAGMENT | fragment}"}`, fragment: `{"fragment-key": 1}`, empty: "{}"},
+		{fileType: general.TOML, content: "\"${REDACT_TEST_SECRET}\" = 1\nstatic = \"${REDACT_TEST_SECRET}\"\n" +
+			"f = \"${REDACT_TEST_FRAGMENT | fragment}\"\na.\"pre_${REDACT_TEST_SECRET}\".b = 2\n", fragment: "{ fragment-key = 1 }"},
+	}
+	for _, tC := range testCases {
+		t.Run(string(tC.fileType), func(t *testing.T) {
+			t.Setenv("REDACT_TEST_FRAGMENT", tC.fragment)
+			file := path.Join(t.TempDir(), "config."+string(tC.fileType))
+			assert.NoError(t, os.WriteFile(file, []byte(tC.content), 0o644))
+
+			processor := NewFileProcessor(file, general.Undefined, io.Discard)
+			assert.Equal(t, []string{"made-up-s3cret"}, processor.RedactKeys(0, 1, []string{"made-up-s3cret"}), "nothing is processed yet")
+			assert.NoError(t, processor.Process())
+			assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-s3cret"}))
+			assert.Equal(t, []string{"a", "pre_***", "b"}, processor.RedactKeys(0, 1, []string{"a", "pre_made-up-s3cret", "b"}))
+			assert.Equal(t, []string{"static"}, processor.RedactKeys(0, 1, []string{"static"}))
+			assert.Equal(t, []string{"f", "fragment-key"}, processor.RedactKeys(0, 1, []string{"f", "fragment-key"}))
+			assert.Equal(t, []string{"other", "made-up-s3cret"}, processor.RedactKeys(0, 1, []string{"other", "made-up-s3cret"}),
+				"keys are masked at their location only")
+			assert.Equal(t, []string{"made-up-s3cret"}, processor.RedactKeys(1, 2, []string{"made-up-s3cret"}),
+				"keys are masked in their document only")
+
+			assert.NoError(t, os.WriteFile(file, []byte(tC.empty), 0o644))
+			assert.NoError(t, processor.Process())
+			assert.Equal(t, []string{"made-up-s3cret"}, processor.RedactKeys(0, 1, []string{"made-up-s3cret"}), "keys of earlier runs are forgotten")
+		})
+	}
+}

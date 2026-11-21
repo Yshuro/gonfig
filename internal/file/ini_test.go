@@ -79,15 +79,15 @@ func TestLineSchemaDecoders(t *testing.T) {
 		assert.NoError(t, os.WriteFile(schemaFile, []byte(`{"const": `+tc.document+`}`), 0o644))
 		sch, err := schema.Load(schemaFile)
 		assert.NoError(t, err)
-		violations, err := sch.Validate(tc.fileType, []byte(tc.content))
+		violations, err := sch.Validate(tc.fileType, []byte(tc.content), nil)
 		assert.NoError(t, err, tc.content)
 		assert.Empty(t, violations, tc.content)
 	}
 
 	sch, err := schema.Load(schemaFile)
 	assert.NoError(t, err)
-	_, err = sch.Validate(general.ENV, []byte("A\n"))
+	_, err = sch.Validate(general.ENV, []byte("A\n"), nil)
 	assert.EqualError(t, err, "line 1: expected KEY=value or a comment starting with #")
-	_, err = sch.Validate(general.INI, []byte("[s\n"))
+	_, err = sch.Validate(general.INI, []byte("[s\n"), nil)
 	assert.EqualError(t, err, "line 1: the section header has no closing ]")
 }

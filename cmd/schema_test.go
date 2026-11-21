@@ -88,7 +88,7 @@ func TestCheckSchema(t *testing.T) {
 	output, err := runCheck(t, "database:\n  host: ${SCHEMA_TEST_HOST}\n  port: ${SCHEMA_TEST_PORT | to_int}\n  password: ${SCHEMA_TEST_PASSWORD}\n",
 		"--schema", configSchemaPath(t))
 	assert.EqualError(t, err, "check failed: 0 missing variables, 2 errors")
-	assert.Contains(t, output, `  schema: database.password: minLength: got 6, want 8
+	assert.Contains(t, output, `  schema: database.password: length must be >= 8
   schema: database.port: value must be <= 65535
 0 missing variables, 2 errors
 `)
@@ -449,5 +449,35 @@ func TestSchemaDecodeErrorsHideValues(t *testing.T) {
 			output = runSchemaSecret(t, tc.command, append([]string{"--log-values"}, tc.args...)...)
 			assert.Contains(t, output, madeUpPassword)
 		})
+	}
+}
+
+// TestSchemaViolationsHideKeys checks that keys produced by placeholders are masked in the violations of process and
+// check, in text and JSON reports, unless --log-values is set
+func TestSchemaViolationsHideKeys(t *testing.T) {
+	t.Setenv("SCHEMA_TEST_PW", madeUpPassword)
+	t.Setenv("GONFIG_LOG_VALUES", "")
+	t.Cleanup(func() {
+		file.SetLogValues(false)
+		filter.SetValuesInErrors(false)
+	})
+	// The working directory changes, so the path is taken before
+	schemaPath := configSchemaPath(t)
+	writeSchemaFiles(t, map[string]string{"config.yaml": "database:\n  host: db\n  port: 1\n  pre_${SCHEMA_TEST_PW}: 1\n"})
+
+	for _, args := range [][]string{
+		{"config", "process", "-f", "config.yaml"},
+		{"config", "check", "-f", "config.yaml"},
+		{"config", "check", "-o", "json", "-f", "config.yaml"},
+	} {
+		args = append(args, "--schema", schemaPath)
+		output, err := runSchemaCommand(t, args...)
+		assert.Error(t, err)
+		assert.Contains(t, output+err.Error(), "additional properties 'pre_***' not allowed", args)
+		assert.NotContains(t, output+err.Error(), madeUpPassword, args)
+
+		output, err = runSchemaCommand(t, append(args, "--log-values")...)
+		assert.Error(t, err)
+		assert.Contains(t, output+err.Error(), "additional properties 'pre_"+madeUpPassword+"' not allowed", args)
 	}
 }

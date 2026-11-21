@@ -4,12 +4,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/denglertai/gonfig/internal/filter"
 	"github.com/denglertai/gonfig/internal/general"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -65,11 +67,11 @@ func TestValidateFileTypes(t *testing.T) {
 	}
 	for _, tC := range testCases {
 		t.Run(string(tC.fileType), func(t *testing.T) {
-			violations, err := s.Validate(tC.fileType, []byte(tC.valid))
+			violations, err := s.Validate(tC.fileType, []byte(tC.valid), nil)
 			assert.NoError(t, err)
 			assert.Empty(t, violations)
 
-			violations, err = s.Validate(tC.fileType, []byte(tC.invalid))
+			violations, err = s.Validate(tC.fileType, []byte(tC.invalid), nil)
 			assert.NoError(t, err)
 			assert.Equal(t, []Violation{
 				{Path: "database", Message: "additional properties 'user' not allowed"},
@@ -84,14 +86,14 @@ func TestValidateFileTypes(t *testing.T) {
 func TestValidateYamlDocuments(t *testing.T) {
 	s := writeSchema(t, configSchema)
 
-	violations, err := s.Validate(general.YAML, []byte("database: {host: db, port: 1}\n---\ndatabase: {host: db}\n---\nother: 1\n"))
+	violations, err := s.Validate(general.YAML, []byte("database: {host: db, port: 1}\n---\ndatabase: {host: db}\n---\nother: 1\n"), nil)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{
 		"document 2: database: missing property 'port'",
 		"document 3: (root): missing property 'database'",
 	}, violationStrings(violations))
 
-	violations, err = s.Validate(general.YAML, nil)
+	violations, err = s.Validate(general.YAML, nil, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"(root): got null, want object"}, violationStrings(violations))
 }
@@ -118,17 +120,17 @@ func TestValidateNormalizes(t *testing.T) {
   }
 }`)
 
-	violations, err := s.Validate(general.YAML, []byte("\xEF\xBB\xBFports:\n  8080: http\n"))
+	violations, err := s.Validate(general.YAML, []byte("\xEF\xBB\xBFports:\n  8080: http\n"), nil)
 	assert.NoError(t, err)
 	assert.Empty(t, violations)
 
 	toml := "\xEF\xBB\xBFdates = [1979-05-27T07:32:00Z, 1979-05-27T07:32:00.5-07:00, 1979-05-27, 07:32:00]\n"
-	violations, err = s.Validate(general.TOML, []byte(toml))
+	violations, err = s.Validate(general.TOML, []byte(toml), nil)
 	assert.NoError(t, err)
 	assert.Empty(t, violations)
 
 	// A local date-time has no offset, which the format date-time requires
-	violations, err = s.Validate(general.TOML, []byte("dates = [1979-05-27T07:32:00]\n"))
+	violations, err = s.Validate(general.TOML, []byte("dates = [1979-05-27T07:32:00]\n"), nil)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"dates.0: value is not valid date-time"}, violationStrings(violations))
 }
@@ -143,11 +145,11 @@ func TestValidateErrors(t *testing.T) {
 		general.YAML: "a: [",
 		general.TOML: "a =",
 	} {
-		_, err := s.Validate(fileType, []byte(content))
+		_, err := s.Validate(fileType, []byte(content), nil)
 		assert.Error(t, err, fileType)
 	}
 
-	_, err := s.Validate(general.PROPERTIES, nil)
+	_, err := s.Validate(general.PROPERTIES, nil, nil)
 	assert.EqualError(t, err, "files of type properties cannot be validated, only JSON, YAML, TOML, dotenv and INI files")
 }
 
@@ -173,7 +175,7 @@ func TestDecodeErrorsWithoutValues(t *testing.T) {
 	s := writeSchema(t, `{}`)
 
 	for _, c := range decodeErrorCases {
-		_, err := s.Validate(c.fileType, []byte(c.content))
+		_, err := s.Validate(c.fileType, []byte(c.content), nil)
 		assert.EqualError(t, err, c.redacted, c.content)
 		assert.NotContains(t, err.Error(), madeUpSecret)
 	}
@@ -185,7 +187,7 @@ func TestDecodeErrorsWithValues(t *testing.T) {
 	s := writeSchema(t, `{}`)
 
 	for _, c := range decodeErrorCases {
-		_, err := s.Validate(c.fileType, []byte(c.content))
+		_, err := s.Validate(c.fileType, []byte(c.content), nil)
 		parserError := errors.Unwrap(err)
 		if assert.NotNil(t, parserError, c.content) {
 			format, _, _ := strings.Cut(c.redacted[len("invalid "):], " ")
@@ -194,7 +196,7 @@ func TestDecodeErrorsWithValues(t *testing.T) {
 	}
 
 	// The parser's message of a value that doesn't match its tag quotes the value
-	_, err := s.Validate(general.YAML, []byte("x: !!int "+madeUpSecret+"\n"))
+	_, err := s.Validate(general.YAML, []byte("x: !!int "+madeUpSecret+"\n"), nil)
 	assert.ErrorContains(t, err, madeUpSecret)
 }
 
@@ -225,11 +227,11 @@ func TestRegisterDecoder(t *testing.T) {
 	t.Cleanup(func() { delete(decoders, fileType) })
 
 	s := writeSchema(t, `{"properties": {"value": {"const": "a"}}}`)
-	violations, err := s.Validate(fileType, []byte("b"))
+	violations, err := s.Validate(fileType, []byte("b"), nil)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"value: value must be 'a'"}, violationStrings(violations))
 
-	_, err = s.Validate(fileType, nil)
+	_, err = s.Validate(fileType, nil, nil)
 	assert.ErrorIs(t, err, assert.AnError)
 }
 
@@ -250,7 +252,7 @@ func TestDescribe(t *testing.T) {
 	document := []byte(`{"pattern": "S3cret", "format": "secret", "minimum": 5, "maximum": 100000, "exclusiveMinimum": 10,` +
 		` "exclusiveMaximum": 0.25, "multipleOf": 0.3, "enum": "c"}`)
 
-	violations, err := s.Validate(general.JSON, document)
+	violations, err := s.Validate(general.JSON, document, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{
 		"enum: value must be one of 'a', 'b'",
@@ -264,7 +266,7 @@ func TestDescribe(t *testing.T) {
 	}, violationStrings(violations))
 
 	allowValuesInErrors(t)
-	violations, err = s.Validate(general.JSON, document)
+	violations, err = s.Validate(general.JSON, document, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{
 		"enum: value must be one of 'a', 'b'",
@@ -278,13 +280,142 @@ func TestDescribe(t *testing.T) {
 	}, violationStrings(violations))
 }
 
+// TestValidateRedactsKeysAndLengths checks that the locations of paths and of keys named by messages are passed through
+// the redactor and that lengths are left out unless values are allowed in errors, which shows the messages of the
+// validator unchanged.
+// The validator reports the violations of propertyNames at the root, not at the object containing the keys.
+func TestValidateRedactsKeysAndLengths(t *testing.T) {
+	s := writeSchema(t, `{
+  "type": "object",
+  "properties": {
+    "pw": {"type": "string", "minLength": 50},
+    "name": {"type": "string", "maxLength": 2},
+    "keys": {"type": "object", "propertyNames": {"maxLength": 5}}
+  },
+  "additionalProperties": {"type": "object", "additionalProperties": {"type": "integer"}}
+}`)
+	document := []byte(`{"pw": "made-up-s3cret", "name": "abc", "keys": {"kmade-up-s3cret": 1},` +
+		` "made-up-s3cret": {"v": "x"}, "static": {"made-up-s3cret": "x"}}`)
+	// The redactor masks the secret in keys at the root only, like a processor that produced only these keys
+	redactKeys := func(document int, documents int, location []string) []string {
+		assert.Equal(t, 0, document)
+		assert.Equal(t, 1, documents)
+		redacted := slices.Clone(location)
+		if len(redacted) > 0 {
+			redacted[0] = strings.ReplaceAll(redacted[0], "made-up-s3cret", "***")
+		}
+		return redacted
+	}
+
+	violations, err := s.Validate(general.JSON, document, redactKeys)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{
+		"(root): length must be <= 5",
+		"***.v: got string, want integer",
+		"name: length must be <= 2",
+		"pw: length must be >= 50",
+		"static.made-up-s3cret: got string, want integer",
+	}, violationStrings(violations))
+
+	closed := writeSchema(t, `{"type": "object", "properties": {"a": {}}, "additionalProperties": false,
+  "propertyNames": false}`)
+	violations, err = closed.Validate(general.JSON, []byte(`{"made-up-s3cret": 1, "x'made-up-s3cret": 2}`), redactKeys)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{
+		"(root): additional properties '***', 'x\\'***' not allowed",
+		"(root): false schema",
+		"(root): false schema",
+	}, violationStrings(violations))
+
+	allowValuesInErrors(t)
+	violations, err = s.Validate(general.JSON, document, redactKeys)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{
+		"(root): maxLength: got 15, want 5",
+		"made-up-s3cret.v: got string, want integer",
+		"name: maxLength: got 3, want 2",
+		"pw: minLength: got 14, want 50",
+		"static.made-up-s3cret: got string, want integer",
+	}, violationStrings(violations))
+}
+
+// TestDescribeKeys checks the messages naming keys, which are redacted at their location within the object, including
+// propertyNames, which the validator reports with the violations of the key as causes, so it is no violation of its own
+func TestDescribeKeys(t *testing.T) {
+	var locations [][]string
+	redact := func(location []string) []string {
+		locations = append(locations, location)
+		redacted := slices.Clone(location)
+		redacted[len(redacted)-1] = "***"
+		return redacted
+	}
+	assert.Equal(t, "invalid propertyName '***'", describe(&kind.PropertyNames{Property: "made-up-s3cret"}, []string{"a"}, redact))
+	assert.Equal(t, [][]string{{"a", "made-up-s3cret"}}, locations)
+	assert.Equal(t, "additional properties '***', '***' not allowed",
+		describe(&kind.AdditionalProperties{Properties: []string{"b", "a"}}, nil, redact))
+	assert.Equal(t, "additional properties 'a', 'b' not allowed",
+		describe(&kind.AdditionalProperties{Properties: []string{"b", "a"}}, nil, slices.Clone[[]string]))
+
+	locations = nil
+	assert.Equal(t, "properties 'pw', 'x\\'y' required, if '***' exists",
+		describe(&kind.Dependency{Prop: "admin", Missing: []string{"pw", "x'y"}}, []string{"a"}, redact))
+	assert.Equal(t, "properties 'pw' required, if '***' exists",
+		describe(&kind.DependentRequired{Prop: "admin", Missing: []string{"pw"}}, []string{"a"}, redact))
+	assert.Equal(t, [][]string{{"a", "admin"}, {"a", "admin"}}, locations)
+}
+
+// TestValidateRedactsDependencies checks that the existing property named by dependencies and dependentRequired,
+// which is a key of the data, is passed through the redactor and shown as is with values in errors, like the
+// validator's message
+func TestValidateRedactsDependencies(t *testing.T) {
+	redactKeys := func(_ int, _ int, location []string) []string {
+		redacted := slices.Clone(location)
+		for i := range redacted {
+			redacted[i] = "***"
+		}
+		return redacted
+	}
+	for _, schemaText := range []string{
+		`{"dependentRequired": {"admin": ["pw"]}}`,
+		`{"$schema": "http://json-schema.org/draft-07/schema#", "dependencies": {"admin": ["pw"]}}`,
+	} {
+		s := writeSchema(t, schemaText)
+		violations, err := s.Validate(general.YAML, []byte("admin: 1\n"), redactKeys)
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"(root): properties 'pw' required, if '***' exists"}, violationStrings(violations), schemaText)
+	}
+
+	allowValuesInErrors(t)
+	s := writeSchema(t, `{"dependentRequired": {"admin": ["pw"]}}`)
+	violations, err := s.Validate(general.YAML, []byte("admin: 1\n"), redactKeys)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"(root): properties 'pw' required, if 'admin' exists"}, violationStrings(violations))
+}
+
+// TestValidateRedactsDocuments checks that the redactor gets the index of the document and the number of documents of
+// YAML files with several documents
+func TestValidateRedactsDocuments(t *testing.T) {
+	s := writeSchema(t, `{"additionalProperties": {"type": "integer"}}`)
+	redactKeys := func(document int, documents int, location []string) []string {
+		assert.Equal(t, 2, documents)
+		redacted := slices.Clone(location)
+		if document == 1 {
+			redacted[0] = "***"
+		}
+		return redacted
+	}
+	violations, err := s.Validate(general.YAML, []byte("a: x\n---\na: x\n"), redactKeys)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"document 1: a: got string, want integer", "document 2: ***: got string, want integer"}, violationStrings(violations))
+}
+
 // TestCheck checks the error of Check for a file that does not match the schema and for content that cannot be decoded
 func TestCheck(t *testing.T) {
 	s := writeSchema(t, configSchema)
 
-	assert.NoError(t, s.Check("app.json", general.JSON, []byte(`{"database": {"host": "db", "port": 1}}`)))
+	assert.NoError(t, s.Check("app.json", general.JSON, []byte(`{"database": {"host": "db", "port": 1}}`), nil))
 
-	err := s.Check("app.json", general.JSON, []byte(`{"database": {"port": 70000}}`))
+	err := s.Check("app.json", general.JSON, []byte(`{"database": {"port": 70000}}`), nil)
 	var schemaError *Error
 	if assert.ErrorAs(t, err, &schemaError) {
 		assert.Len(t, schemaError.Violations, 2)
@@ -293,7 +424,7 @@ func TestCheck(t *testing.T) {
   - database: missing property 'host'
   - database\.port: value must be <= 65535$`, err.Error())
 
-	assert.ErrorContains(t, s.Check("app.json", general.JSON, []byte("{")), "failed to validate app.json against the schema ")
+	assert.ErrorContains(t, s.Check("app.json", general.JSON, []byte("{"), nil), "failed to validate app.json against the schema ")
 }
 
 // TestLoadErrors checks the errors of schemas that cannot be loaded, including remote references, which are never fetched
@@ -348,7 +479,7 @@ func TestTagMismatchLocations(t *testing.T) {
 		{"multiline value", "a: |\n  x\n  y\nb: !!int " + secret + "\n", mismatch(4, "!!int")},
 		{"first of two", "a: !!int " + secret + "\nb: !!int " + secret + "\n", mismatch(1, "!!int")},
 	} {
-		_, err := s.Validate(general.YAML, []byte(c.content))
+		_, err := s.Validate(general.YAML, []byte(c.content), nil)
 		assert.EqualError(t, err, c.want, c.name)
 	}
 
@@ -359,7 +490,7 @@ func TestTagMismatchLocations(t *testing.T) {
 		"a: !!int 1\n---\nb: !!str 2\n",
 		"a: &x !!int 1\nb: *x\n",
 	} {
-		_, err := s.Validate(general.YAML, []byte(content))
+		_, err := s.Validate(general.YAML, []byte(content), nil)
 		assert.NoError(t, err, content)
 	}
 }
@@ -383,7 +514,7 @@ func TestTagMismatchNoFalsePositives(t *testing.T) {
 		"a: !!timestamp 2024-01-02T03:04:05Z\nb: !!timestamp 2024-01-02 03:04:05\nc: !!null \"\"\nd: !!null\n",
 		"a: !!int '7'\nb: !!float \"1.5\"\nc: !!bool 'true'\n",
 	} {
-		_, err := s.Validate(general.YAML, []byte(content))
+		_, err := s.Validate(general.YAML, []byte(content), nil)
 		assert.NoError(t, err, content)
 		line, _ := tagMismatch([]byte(content))
 		assert.Zero(t, line, content)

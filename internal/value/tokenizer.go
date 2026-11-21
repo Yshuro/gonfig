@@ -56,6 +56,33 @@ func ProcessMaskedValue(value string) (any, error) {
 	return processValue(value, true)
 }
 
+// MaskPlaceholders returns the value with each placeholder replaced by Mask and escape sequences by their text, like
+// ProcessMaskedValue, e.g. "pre_***" for "pre_${VAR}". It only scans the value, so no filters run, e.g. of plugins.
+// A value with an unterminated placeholder is masked completely, since the end of the placeholder is unknown.
+func MaskPlaceholders(value string) string {
+	if !strings.Contains(value, "${") {
+		return value
+	}
+	placeholders, err := scanValue(value)
+	if err != nil {
+		return Mask
+	}
+
+	var result strings.Builder
+	last := 0
+	for _, p := range placeholders {
+		result.WriteString(value[last:p.start])
+		if p.isEscape() {
+			result.WriteString(p.literal)
+		} else {
+			result.WriteString(Mask)
+		}
+		last = p.end
+	}
+	result.WriteString(value[last:])
+	return result.String()
+}
+
 // processValue replaces all placeholders within the value by the result of their filters, or by Mask if masked
 func processValue(value string, masked bool) (any, error) {
 	// Most values do not contain any placeholders, so return them without any further processing
