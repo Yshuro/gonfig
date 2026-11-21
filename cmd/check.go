@@ -109,6 +109,7 @@ placeholders and the values inserted by fragments are shown as *** unless --log-
 func validateChecked(report *file.CheckReport, processor *file.FileProcessor, schemas []*schema.Schema) {
 	var processed bytes.Buffer
 	processor.Output = &processed
+	processor.Validated = true
 	if err := processor.Process(); err != nil {
 		// The check found no problems, so processing only fails if the file changed in the meantime
 		report.Error = err.Error()

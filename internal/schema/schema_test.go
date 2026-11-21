@@ -297,7 +297,7 @@ func TestValidateRedactsKeysAndLengths(t *testing.T) {
 	document := []byte(`{"pw": "made-up-s3cret", "name": "abc", "keys": {"kmade-up-s3cret": 1},` +
 		` "made-up-s3cret": {"v": "x"}, "static": {"made-up-s3cret": "x"}}`)
 	// The redactor masks the secret in keys at the root only, like a processor that produced only these keys
-	redactKeys := func(document int, documents int, location []string) []string {
+	redactKeys := func(document int, documents int, location []string, _ []bool) []string {
 		assert.Equal(t, 0, document)
 		assert.Equal(t, 1, documents)
 		redacted := slices.Clone(location)
@@ -368,7 +368,7 @@ func TestDescribeKeys(t *testing.T) {
 // which is a key of the data, is passed through the redactor and shown as is with values in errors, like the
 // validator's message
 func TestValidateRedactsDependencies(t *testing.T) {
-	redactKeys := func(_ int, _ int, location []string) []string {
+	redactKeys := func(_ int, _ int, location []string, _ []bool) []string {
 		redacted := slices.Clone(location)
 		for i := range redacted {
 			redacted[i] = "***"
@@ -392,11 +392,29 @@ func TestValidateRedactsDependencies(t *testing.T) {
 	assert.Equal(t, []string{"(root): properties 'pw' required, if 'admin' exists"}, violationStrings(violations))
 }
 
+// TestDecode checks that Decode decodes like the validator, e.g. every document of a YAML file
+func TestDecode(t *testing.T) {
+	documents, err := Decode(general.YAML, []byte("a: 1\n---\nb: 2\n"))
+	assert.NoError(t, err)
+	assert.Equal(t, []any{map[string]any{"a": 1}, map[string]any{"b": 2}}, documents)
+}
+
+// TestArrayIndexes checks which parts of locations are array indexes, also for invalid indexes and parts beyond the
+// document
+func TestArrayIndexes(t *testing.T) {
+	document := map[string]any{"l": []any{map[string]any{"0": 1}}, "s": "x"}
+	assert.Equal(t, []bool{false, true, false}, arrayIndexes(document, []string{"l", "0", "0"}))
+	assert.Equal(t, []bool{false, false}, arrayIndexes(document, []string{"l", "x"}))
+	assert.Equal(t, []bool{false, false}, arrayIndexes(document, []string{"l", "1"}))
+	assert.Equal(t, []bool{false, false}, arrayIndexes(document, []string{"s", "0"}))
+	assert.Empty(t, arrayIndexes(document, nil))
+}
+
 // TestValidateRedactsDocuments checks that the redactor gets the index of the document and the number of documents of
 // YAML files with several documents
 func TestValidateRedactsDocuments(t *testing.T) {
 	s := writeSchema(t, `{"additionalProperties": {"type": "integer"}}`)
-	redactKeys := func(document int, documents int, location []string) []string {
+	redactKeys := func(document int, documents int, location []string, _ []bool) []string {
 		assert.Equal(t, 2, documents)
 		redacted := slices.Clone(location)
 		if document == 1 {

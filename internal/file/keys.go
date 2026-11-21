@@ -1,12 +1,14 @@
 package file
 
 import (
+	"bytes"
 	"encoding/json"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/denglertai/gonfig/internal/general"
 	"github.com/denglertai/gonfig/internal/schema"
 	"github.com/denglertai/gonfig/internal/value"
 	"github.com/pelletier/go-toml/v2/unstable"
@@ -78,12 +80,17 @@ func (t *TomlConfigEntry) mayBeKey() bool {
 
 // recordKeyCandidate records an entry with placeholders that may end up as a key, with its text masked like in the
 // diff of Check, e.g. "pre_***". The masked text is built from the text before processing, so no filters run again.
-// A check validates nothing, so nothing is recorded then.
+// An entry with escape sequences only, e.g. "$${X}", is a key of known text, which is recorded as a static key.
+// Nothing is recorded unless the content is validated, see FileProcessor.Validated.
 func (fp *FileProcessor) recordKeyCandidate(entry ConfigEntry, current string) {
-	if fp.report != nil {
+	if !fp.Validated || fp.report != nil {
 		return
 	}
-	if candidate, ok := entry.(keyCandidate); !ok || !candidate.mayBeKey() || !value.HasPlaceholders(current) {
+	if candidate, ok := entry.(keyCandidate); !ok || !candidate.mayBeKey() {
+		return
+	}
+	if !value.HasPlaceholders(current) {
+		fp.addStaticKey(value.MaskPlaceholders(current))
 		return
 	}
 	if fp.keyCandidates == nil {
@@ -93,7 +100,7 @@ func (fp *FileProcessor) recordKeyCandidate(entry ConfigEntry, current string) {
 }
 
 // keyLocatorOf returns what is needed to locate the keys produced by placeholders after writing, or nil if there are
-// none. It is called before writing, so the handler, and with it the document as read, is not referenced after
+// none or the content is not validated. It is called before writing, so the handler, and with it the document as read, is not referenced after
 // writing and can be freed while it is written, e.g. while JSON is indented. The candidates are not needed afterwards.
 func (fp *FileProcessor) keyLocatorOf(handler ConfigFileHandler) keyLocator {
 	candidates := fp.keyCandidates
@@ -110,13 +117,16 @@ func (fp *FileProcessor) keyLocatorOf(handler ConfigFileHandler) keyLocator {
 
 // RedactKeys returns the location within the document written by the last Process with the keys produced by
 // placeholders replaced by their masked text, e.g. "***" or "pre_***" for a key "pre_${VAR}", see schema.KeyRedactor.
-// Other keys and array indexes are kept, including the keys of fragments, which are part of the structure like in
-// the diff of Check. document is the index of the document and documents the number of documents the validator
-// decoded, which differ from 0 and 1 for YAML files with several documents only.
+// document is the index of the document and documents the number of documents the validator decoded, which differ
+// from 0 and 1 for YAML files with several documents only. indexes tells which parts are array indexes.
 //
-// The keys are located on the first call. If they cannot be located for sure, every part of every location is
-// masked, including array indexes, since leaking a key is worse than hiding the structure.
-func (fp *FileProcessor) RedactKeys(document int, documents int, location []string) []string {
+// The keys are located on the first call. Besides, as a safety net for keys the locator misses, only keys of known
+// static origin are shown: keys of the input and of fragments as decoded, see recordStaticKeys. Every other key is
+// masked as "***", while array indexes are kept. Keys of fragments are part of the structure like in the diff of
+// Check, so they are shown. If the keys cannot be located for sure, every part of every location is masked,
+// including array indexes, since leaking a key is worse than hiding the structure. Without Validated, nothing is
+// recorded, so every key is masked.
+func (fp *FileProcessor) RedactKeys(document int, documents int, location []string, indexes []bool) []string {
 	if fp.keyLocator != nil {
 		var sure bool
 		fp.keys, sure = fp.keyLocator.locateKeys(documents)
@@ -125,21 +135,118 @@ func (fp *FileProcessor) RedactKeys(document int, documents int, location []stri
 	}
 
 	redacted := slices.Clone(location)
-	if fp.keysUnsure {
-		for i := range redacted {
+	for i, part := range location {
+		if fp.keysUnsure {
 			redacted[i] = value.Mask
+			continue
 		}
-		return redacted
-	}
-	if len(fp.keys) == 0 {
-		return redacted
-	}
-	for i := range location {
-		if masked, ok := fp.keys[locationKey(document, location[:i+1])]; ok {
-			redacted[i] = masked
+		if len(fp.keys) > 0 {
+			if masked, ok := fp.keys[locationKey(document, location[:i+1])]; ok {
+				redacted[i] = masked
+				continue
+			}
+		}
+		if i < len(indexes) && indexes[i] {
+			continue
+		}
+		if _, static := fp.staticKeys[part]; !static {
+			redacted[i] = value.Mask
 		}
 	}
 	return redacted
+}
+
+// addStaticKey records a key of known static origin, which is shown in violations, see RedactKeys
+func (fp *FileProcessor) addStaticKey(key string) {
+	if fp.staticKeys == nil {
+		fp.staticKeys = make(map[string]struct{})
+	}
+	fp.staticKeys[key] = struct{}{}
+}
+
+// recordStaticKeys records the keys of the input or of a fragment as the validator decodes them, which contain no
+// results of placeholders, so they are shown in violations, see RedactKeys. Keys with placeholders are recorded with
+// their placeholders, which are no secrets. JSON, TOML, dotenv and INI content is decoded like the validator decodes
+// it. YAML is parsed into nodes, since decoding fails for placeholders after tags, e.g. "!!int ${PORT}", and keys
+// that are aliases of anchored scalars are recorded as well. A fragment of a TOML file is a value or the key/value
+// pairs of a fragment used as a key, so both are tried. Content that cannot be decoded records nothing, so its keys
+// are masked.
+func (fp *FileProcessor) recordStaticKeys(content []byte, fragment bool) {
+	switch fp.FileType {
+	case general.YAML, general.YML:
+		fp.recordYamlStaticKeys(content, fragment)
+	case general.TOML:
+		if documents, err := schema.Decode(general.TOML, content); err == nil {
+			fp.recordDecodedKeys(documents...)
+		}
+		if fragment {
+			if documents, err := schema.Decode(general.TOML, append([]byte(tomlFragmentKey), content...)); err == nil {
+				if pair, ok := documents[0].(map[string]any); ok {
+					fp.recordDecodedKeys(pair["v"])
+				}
+			}
+		}
+	case general.JSON, general.ENV, general.DOTENV, general.INI:
+		if documents, err := schema.Decode(fp.FileType, content); err == nil {
+			fp.recordDecodedKeys(documents...)
+		}
+	}
+}
+
+// recordDecodedKeys records the keys of the objects within the decoded values
+func (fp *FileProcessor) recordDecodedKeys(values ...any) {
+	for _, decoded := range values {
+		switch v := decoded.(type) {
+		case map[string]any:
+			for key, item := range v {
+				fp.addStaticKey(key)
+				fp.recordDecodedKeys(item)
+			}
+		case []any:
+			fp.recordDecodedKeys(v...)
+		}
+	}
+}
+
+// recordYamlStaticKeys records the keys and anchored scalars of every YAML document of the content, both as written
+// and as decoded with their tag, e.g. 0x1F and 31 for "!!int 0x1F", since the decoder keeps the text of an integer
+// key merged into a mapping with string keys. The values of a fragment are results of placeholders, so anchored
+// scalars of fragments are not recorded, which an alias could use as a key.
+func (fp *FileProcessor) recordYamlStaticKeys(content []byte, fragment bool) {
+	var record func(node *yaml.Node)
+	record = func(node *yaml.Node) {
+		if node.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				fp.recordYamlScalar(node.Content[i])
+			}
+		}
+		if node.Anchor != "" && !fragment {
+			fp.recordYamlScalar(node)
+		}
+		for _, child := range node.Content {
+			record(child)
+		}
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	for {
+		var document yaml.Node
+		if decoder.Decode(&document) != nil {
+			return
+		}
+		record(&document)
+	}
+}
+
+// recordYamlScalar records the text of a scalar as written and as decoded, see recordYamlStaticKeys
+func (fp *FileProcessor) recordYamlScalar(node *yaml.Node) {
+	if node.Kind != yaml.ScalarNode {
+		return
+	}
+	fp.addStaticKey(node.Value)
+	if text, ok := yamlKeyText(node); ok {
+		fp.addStaticKey(text)
+	}
 }
 
 // The schema validator gets the redactor of the processor

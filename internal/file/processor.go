@@ -56,9 +56,12 @@ type FileProcessor struct {
 	Input io.Reader
 	// Diff adds the changes processing the file would make to the report of Check
 	Diff bool
+	// Validated is set if the processed content is validated against a schema, so Process records what RedactKeys
+	// needs to mask the keys produced by placeholders in violations. Without it, Process records nothing.
+	Validated bool
 	// report collects the problems of all entries while checking the file, see Check
 	report *CheckReport
-	// source is the content of the file as read, which is only kept for the diff
+	// source is the content of the file as read, which is only kept for the diff and to record the keys of the input
 	source []byte
 	// format is the BOM and line ending of the file, which are restored when writing, see restoreFormat
 	format textFormat
@@ -69,6 +72,8 @@ type FileProcessor struct {
 	// until RedactKeys locates them, see keyLocatorOf.
 	keyCandidates map[ConfigEntry]string
 	keyLocator    keyLocator
+	// staticKeys are the keys of the input and of fragments as decoded, which are shown in violations, see RedactKeys
+	staticKeys map[string]struct{}
 	// keys are the locations of the keys produced by placeholders during the last Process, see RedactKeys. keysUnsure
 	// is set if they could not be located for sure, so every key is masked.
 	keys       keyLocations
@@ -110,10 +115,16 @@ func NewFileProcessor(fileName string, fileType general.FileType, output io.Writ
 // If any value fails to process, nothing is written.
 func (fp *FileProcessor) Process() error {
 	fp.changed = false
-	fp.keyCandidates, fp.keyLocator, fp.keys, fp.keysUnsure = nil, nil, nil, false
+	fp.keyCandidates, fp.keyLocator, fp.keys, fp.keysUnsure, fp.staticKeys = nil, nil, nil, false, nil
 	handler, entries, err := fp.read()
 	if err != nil {
 		return err
+	}
+	if fp.Validated {
+		fp.recordStaticKeys(fp.source, false)
+		if !fp.Diff {
+			fp.source = nil
+		}
 	}
 
 	for entry := range entries {
@@ -179,7 +190,7 @@ func (fp *FileProcessor) open(handler ConfigFileHandler) (io.ReadCloser, error) 
 
 	var source io.ReadCloser
 	switch {
-	case fp.Input != nil && fp.Diff:
+	case fp.Input != nil && (fp.Diff || fp.Validated):
 		content, err := io.ReadAll(fp.Input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read %s: %w", fp.FileName, err)
@@ -189,7 +200,7 @@ func (fp *FileProcessor) open(handler ConfigFileHandler) (io.ReadCloser, error) 
 	case fp.Input != nil:
 		// The input is owned by the caller, e.g. stdin, so it is not closed
 		source = io.NopCloser(fp.Input)
-	case fp.Diff:
+	case fp.Diff || fp.Validated:
 		content, err := os.ReadFile(fp.FileName)
 		if err != nil {
 			return nil, err
@@ -390,6 +401,9 @@ func (fp *FileProcessor) insertFragment(entry ConfigEntry, fragment filter.Fragm
 		return fmt.Errorf("failed to process the value of %s in %s: %w", entry.Path(), fp.FileName, errFragmentNotSupported)
 	}
 
+	if fp.Validated {
+		fp.recordStaticKeys([]byte(fragment.Text), true)
+	}
 	inserted, err := fragmentEntry.SetFragment(fragment)
 	if err != nil {
 		return fmt.Errorf("failed to insert the fragment of %s in %s: %w", entry.Path(), fp.FileName, err)

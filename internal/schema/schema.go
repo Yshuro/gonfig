@@ -97,8 +97,10 @@ func Load(path string) (*Schema, error) {
 // KeyRedactor returns the location of a value within a document, given as its keys and array indexes like
 // jsonschema.ValidationError.InstanceLocation, with the keys produced by placeholders masked, e.g. "***" or "pre_***".
 // document is the index of the document and documents the number of documents decoded from the content, which differ
-// from 0 and 1 for YAML files with several documents only. It must return a new slice of the same length.
-type KeyRedactor func(document int, documents int, location []string) []string
+// from 0 and 1 for YAML files with several documents only. indexes tells for every part of the location whether it is
+// the index of an array item rather than a key, as found in the decoded document. It must return a new slice of the
+// same length.
+type KeyRedactor func(document int, documents int, location []string, indexes []bool) []string
 
 // Check validates the processed content of the file and returns an *Error listing the violations if it does not match.
 // redactKeys hides keys produced by placeholders in the violations, see Validate.
@@ -128,7 +130,7 @@ func (s *Schema) Validate(fileType general.FileType, data []byte, redactKeys Key
 	}
 
 	if redactKeys == nil || filter.ValuesInErrors() {
-		redactKeys = func(_ int, _ int, location []string) []string { return slices.Clone(location) }
+		redactKeys = func(_ int, _ int, location []string, _ []bool) []string { return slices.Clone(location) }
 	}
 
 	var violations []Violation
@@ -141,7 +143,9 @@ func (s *Schema) Validate(fileType general.FileType, data []byte, redactKeys Key
 		// The validator returns a *ValidationError for every violation, including values of types it doesn't support
 		var validationError *jsonschema.ValidationError
 		if errors.As(s.schema.Validate(document), &validationError) {
-			redact := func(location []string) []string { return redactKeys(i, len(documents), location) }
+			redact := func(location []string) []string {
+				return redactKeys(i, len(documents), location, arrayIndexes(document, location))
+			}
 			violations = appendViolations(violations, validationError, prefix, redact)
 		}
 	}
@@ -170,6 +174,28 @@ func appendViolations(violations []Violation, validationError *jsonschema.Valida
 		return cmp.Or(cmp.Compare(a.Path, b.Path), cmp.Compare(a.Message, b.Message))
 	})
 	return violations
+}
+
+// arrayIndexes returns for every part of the location within the document whether it is the index of an array item.
+// Parts beyond the document, e.g. the name of a missing property, are keys.
+func arrayIndexes(document any, location []string) []bool {
+	indexes := make([]bool, len(location))
+	current := document
+	for i, part := range location {
+		switch value := current.(type) {
+		case []any:
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(value) {
+				return indexes
+			}
+			indexes[i], current = true, value[index]
+		case map[string]any:
+			current = value[part]
+		default:
+			return indexes
+		}
+	}
+	return indexes
 }
 
 // printer formats the messages of the validator in English
@@ -268,6 +294,12 @@ func number(n *big.Rat) string {
 	}
 	f, _ := n.Float64()
 	return strconv.FormatFloat(f, 'g', -1, 64)
+}
+
+// Decode decodes the documents of the content of a file of the type like the validator does, see Schema.Validate.
+// The file package uses it to find the keys of the input, which are shown in violations, see KeyRedactor.
+func Decode(fileType general.FileType, data []byte) ([]any, error) {
+	return decode(fileType, data)
 }
 
 // decode decodes the documents of the content into the values the validator expects: maps with string keys, slices,

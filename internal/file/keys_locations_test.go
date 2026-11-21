@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,6 +20,7 @@ func processedKeys(t *testing.T, fileType general.FileType, content string) *Fil
 	file := filepath.Join(t.TempDir(), "config."+string(fileType))
 	assert.NoError(t, os.WriteFile(file, []byte(content), 0o644))
 	processor := NewFileProcessor(file, general.Undefined, &bytes.Buffer{})
+	processor.Validated = true
 	if !assert.NoError(t, processor.Process()) {
 		t.FailNow()
 	}
@@ -63,7 +65,7 @@ func TestRedactKeysLocations(t *testing.T) {
 			0, []string{"d", "0", "made-up-p"}, []string{"d", "0", "***"}},
 		{"yaml second document", general.YAML, "x: 1\n---\n\"${KEYS_LOC_P}\": 1\n",
 			1, []string{"made-up-p"}, []string{"***"}},
-		{"yaml other document stays visible", general.YAML, "x: 1\n---\n\"${KEYS_LOC_P}\": 1\n",
+		{"yaml other document stays visible", general.YAML, "made-up-p: 1\n---\n\"${KEYS_LOC_P}\": 1\n",
 			0, []string{"made-up-p"}, []string{"made-up-p"}},
 		{"yaml key with a separator and quote", general.YAML, "\"${KEYS_LOC_DOT}\": {x: 1}\n",
 			0, []string{`a.b"c`, "x"}, []string{"***", "x"}},
@@ -78,7 +80,7 @@ func TestRedactKeysLocations(t *testing.T) {
 		{"yaml merge cycle", general.YAML, "a: &a\n  <<: *a\n  \"${KEYS_LOC_P}\": 1\n",
 			0, []string{"a", "made-up-p"}, []string{"a", "***"}},
 		{"yaml location beyond the document", general.YAML, "\"${KEYS_LOC_P}\": 1\n",
-			0, []string{"made-up-p", "x", "y"}, []string{"***", "x", "y"}},
+			0, []string{"made-up-p", "x", "y"}, []string{"***", "***", "***"}},
 		{"yaml no location", general.YAML, "\"${KEYS_LOC_P}\": 1\n", 0, nil, nil},
 
 		{"json array of objects", general.JSON, `{"l": [{"${KEYS_LOC_P}": 1}, {"${KEYS_LOC_P}": 2, "made-up-p": 3, "s": 4}]}`,
@@ -118,7 +120,7 @@ func TestRedactKeysLocations(t *testing.T) {
 	for _, tC := range testCases {
 		t.Run(tC.desc, func(t *testing.T) {
 			processor := processedKeys(t, tC.fileType, tC.content)
-			assert.Equal(t, tC.want, processor.RedactKeys(tC.document, strings.Count(tC.content, "\n---\n")+1, tC.location))
+			assert.Equal(t, tC.want, processor.RedactKeys(tC.document, strings.Count(tC.content, "\n---\n")+1, tC.location, digitIndexes(tC.location)))
 		})
 	}
 }
@@ -129,11 +131,11 @@ func TestRedactKeysDuplicateKeys(t *testing.T) {
 	t.Setenv("KEYS_LOC_Q", "made-up-p")
 
 	processor := processedKeys(t, general.JSON, `{"${KEYS_LOC_P}": 1, "${KEYS_LOC_Q}": 2, "static": 3}`)
-	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-p"}))
-	assert.Equal(t, []string{"static"}, processor.RedactKeys(0, 1, []string{"static"}))
+	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-p"}, digitIndexes([]string{"made-up-p"})))
+	assert.Equal(t, []string{"static"}, processor.RedactKeys(0, 1, []string{"static"}, digitIndexes([]string{"static"})))
 
 	processor = processedKeys(t, general.JSON, `{"${KEYS_LOC_P}": 1, "made-up-p": 2}`)
-	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-p"}),
+	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-p"}, digitIndexes([]string{"made-up-p"})),
 		"a static key equal to a processed one is indistinguishable in the written document")
 }
 
@@ -166,10 +168,22 @@ func TestRedactKeysProcessAgain(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config.json")
 	assert.NoError(t, os.WriteFile(file, []byte(`{"${KEYS_LOC_P}": 1}`), 0o644))
 	processor := NewFileProcessor(file, general.Undefined, &bytes.Buffer{})
+	processor.Validated = true
 	assert.NoError(t, processor.Process())
-	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-p"}))
+	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-p"}, digitIndexes([]string{"made-up-p"})))
 
 	assert.NoError(t, os.WriteFile(file, []byte(`{"made-up-p": 1}`), 0o644))
 	assert.NoError(t, processor.Process())
-	assert.Equal(t, []string{"made-up-p"}, processor.RedactKeys(0, 1, []string{"made-up-p"}))
+	assert.Equal(t, []string{"made-up-p"}, processor.RedactKeys(0, 1, []string{"made-up-p"}, digitIndexes([]string{"made-up-p"})))
+}
+
+// digitIndexes returns which parts of the location are array indexes for RedactKeys, assuming that every number is one,
+// which holds for the locations of these tests
+func digitIndexes(location []string) []bool {
+	indexes := make([]bool, len(location))
+	for i, part := range location {
+		_, err := strconv.Atoi(part)
+		indexes[i] = err == nil
+	}
+	return indexes
 }

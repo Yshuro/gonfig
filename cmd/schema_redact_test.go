@@ -155,6 +155,31 @@ func TestSchemaViolationsHideKeysOfAliasesTagsAndInvalidUTF8(t *testing.T) {
 		{name: "index equal to a processed key", env: map[string]string{"SCHEMA_KEY_PW": "0"}, file: "c.yaml",
 			content: "${SCHEMA_KEY_PW}: 1\nlist: [{x: s}]\n", schema: leafSchema,
 			want: []string{"list.0.x"}},
+		{name: "merge tagged sequence item", env: map[string]string{"SCHEMA_KEY_PW": "made-up-seq-s3cret"}, file: "c.yaml",
+			content: "l:\n  - !!merge x\n  - {\"${SCHEMA_KEY_PW}\": 1}\n",
+			schema:  `{"properties": {"l": {"items": {"additionalProperties": false}}}}`,
+			want:    []string{"additional properties '***' not allowed"}, hidden: []string{"made-up-seq-s3cret"}},
+		{name: "anchor redefined by a fragment", env: map[string]string{"SCHEMA_KEY_PW": "made-up-anchor-s3cret",
+			"SCHEMA_KEY_FR": `[&k "${SCHEMA_KEY_PW}"]`}, file: "c.yaml",
+			content: "a: &k static-anchor\nf: ${SCHEMA_KEY_FR | fragment}\nm:\n  *k : {c: x}\n",
+			schema:  `{"properties": {"m": {"additionalProperties": {"additionalProperties": {"type": "integer"}}}}}`,
+			want:    []string{"m.***.c"}, hidden: []string{"made-up-anchor-s3cret"}},
+		{name: "anchored scalar of a fragment", env: map[string]string{"SCHEMA_KEY_FR": "&s made-up-fragment-s3cret"},
+			file: "c.yaml", content: "x: &s plain\nf: ${SCHEMA_KEY_FR | fragment}\na: {*s : 1}\n",
+			schema: `{"additionalProperties": {"additionalProperties": false}}`,
+			want:   []string{"additional properties '***' not allowed"}, hidden: []string{"made-up-fragment-s3cret"}},
+		{name: "anchored scalar within a mapping of a fragment", env: map[string]string{"SCHEMA_KEY_FR": "{q: &s made-up-fragment-s3cret}"},
+			file: "c.yaml", content: "x: &s plain\nf: ${SCHEMA_KEY_FR | fragment}\na: {*s : 1}\n",
+			schema: `{"additionalProperties": {"additionalProperties": false}}`,
+			want:   []string{"additional properties '***' not allowed"}, hidden: []string{"made-up-fragment-s3cret"}},
+		{name: "alias within a fragment", env: map[string]string{"SCHEMA_KEY_FR": "{v: &a made-up-fragment-s3cret, m: {*a : 1}}"},
+			file: "c.yaml", content: "f: ${SCHEMA_KEY_FR | fragment}\n",
+			schema: `{"properties": {"f": {"properties": {"m": {"additionalProperties": false}}}}}`,
+			want:   []string{"additional properties '***' not allowed"}, hidden: []string{"made-up-fragment-s3cret"}},
+		{name: "integer key merged into string keys", env: map[string]string{"SCHEMA_KEY_PW": "0x5EC"}, file: "c.yaml",
+			content: "base: &b {!!int \"${SCHEMA_KEY_PW}\": 1}\nd:\n  s: 1\n  <<: *b\n",
+			schema:  `{"properties": {"d": {"properties": {"s": {}}, "additionalProperties": false}}}`,
+			want:    []string{"additional properties '***' not allowed"}, hidden: []string{"0x5EC"}},
 	}
 	for _, tC := range testCases {
 		t.Run(tC.name, func(t *testing.T) {
@@ -251,4 +276,64 @@ func TestProcessAliasExpansionWithoutSchema(t *testing.T) {
 	// The validator rejects the file, since it expands too much, so the keys are never located
 	_, err = runSchemaCommand(t, "config", "process", "-f", "c.yaml", "--schema", "schema.json")
 	assert.ErrorContains(t, err, "invalid YAML")
+}
+
+// TestSchemaViolationsShowStaticKeys checks that keys of the input and of fragments stay visible in violations in every
+// file type, also when the file has keys produced by placeholders, which are masked: quoted keys, keys with dots and
+// spaces, TOML dotted and quoted keys, YAML keys of merged anchors and aliases of static scalars, escaped placeholders
+// and keys of dotenv and INI files
+func TestSchemaViolationsShowStaticKeys(t *testing.T) {
+	t.Setenv("SCHEMA_STATIC_PW", "made-up-static-s3cret")
+	t.Setenv("SCHEMA_STATIC_FR", `{"frag key": {"x": "s"}}`)
+	t.Setenv("GONFIG_LOG_VALUES", "")
+	t.Cleanup(func() {
+		file.SetLogValues(false)
+		filter.SetValuesInErrors(false)
+	})
+
+	testCases := []struct {
+		file    string
+		content string
+		want    []string
+	}{
+		{"c.yaml", "${SCHEMA_STATIC_PW}: {x: s}\n\"quoted key\": {x: s}\na.b c: {x: s}\nbase: &b {merged: {x: s}}\n" +
+			"m:\n  <<: *b\nv: &v aliased\nal:\n  *v : {x: s}\n$${ESC}: {x: s}\nf: ${SCHEMA_STATIC_FR | fragment}\n",
+			[]string{"***.x", "quoted key.x", "a.b c.x", "base.merged.x", "m.merged.x", "al.aliased.x", "${ESC}.x", "f.frag key.x"}},
+		{"c.json", `{"${SCHEMA_STATIC_PW}": {"x": "s"}, "quoted key": {"x": "s"}, "a.b": {"x": "s"}, "$${ESC}": {"x": "s"}, ` +
+			`"f": "${SCHEMA_STATIC_FR | fragment}"}`,
+			[]string{"***.x", "quoted key.x", "a.b.x", "${ESC}.x", "f.frag key.x"}},
+		{"c.toml", "\"${SCHEMA_STATIC_PW}\" = { x = \"s\" }\n\"quoted key\" = { x = \"s\" }\na.\"b c\".x = \"s\"\n" +
+			"[t.\"d.e\"]\nx = \"s\"\n",
+			[]string{"***.x", "quoted key.x", "a.b c.x", "t.d.e.x"}},
+	}
+	for _, tC := range testCases {
+		t.Run(tC.file, func(t *testing.T) {
+			writeSchemaFiles(t, map[string]string{tC.file: tC.content, "leaf.json": leafSchema})
+			for _, args := range [][]string{
+				{"config", "process", "-f", tC.file},
+				{"config", "check", "-f", tC.file},
+				{"config", "check", "-o", "json", "-f", tC.file},
+			} {
+				args = append(args, "--schema", "leaf.json")
+				output, err := runSchemaCommand(t, args...)
+				if !assert.Error(t, err, args) {
+					continue
+				}
+				all := output + err.Error()
+				for _, want := range tC.want {
+					assert.True(t, strings.Contains(all, want+": got string") || strings.Contains(all, `"path": "`+want+`"`),
+						"%s in %v", want, args)
+				}
+				assert.NotContains(t, all, "made-up-static-s3cret", args)
+			}
+		})
+	}
+
+	writeSchemaFiles(t, map[string]string{"c.env": "PLAIN_KEY=x\nOTHER=${SCHEMA_STATIC_PW}\n", "c.ini": "top=x\n[section]\nkey=x\n",
+		"strict.json": `{"additionalProperties": {"type": "object"}}`})
+	output, err := runSchemaCommand(t, "config", "check", "-f", "c.env", "-f", "c.ini", "--schema", "strict.json")
+	assert.Error(t, err)
+	assert.Contains(t, output, "schema: PLAIN_KEY: got string")
+	assert.Contains(t, output, "schema: OTHER: got string")
+	assert.Contains(t, output, "schema: top: got string")
 }

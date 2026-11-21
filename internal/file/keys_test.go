@@ -33,6 +33,7 @@ func redactedViolations(t *testing.T, fileType general.FileType, content string,
 
 	var output bytes.Buffer
 	processor := NewFileProcessor(file, general.Undefined, &output)
+	processor.Validated = true
 	if !assert.NoError(t, processor.Process()) {
 		return nil
 	}
@@ -184,8 +185,10 @@ func TestRedactKeysUnchangedOrUndecodable(t *testing.T) {
 	assert.NoError(t, os.WriteFile(file, []byte("!!int ${KEYS_TEST_PW}: 1\n"), 0o644))
 	var output bytes.Buffer
 	processor := NewFileProcessor(file, general.Undefined, &output)
+	processor.Validated = true
 	assert.NoError(t, processor.Process())
-	assert.Equal(t, []string{"made-up-s3cret"}, processor.RedactKeys(0, 1, []string{"made-up-s3cret"}), "no key is located")
+	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-s3cret"}, digitIndexes([]string{"made-up-s3cret"})),
+		"no key is located, but the key is no key of the input")
 }
 
 // TestRedactKeysEmptyYamlDocuments checks that documents are numbered like the validator numbers the documents of the
@@ -232,9 +235,10 @@ func TestRedactKeysUnsure(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "config."+string(fileType))
 			assert.NoError(t, os.WriteFile(file, []byte(content), 0o644))
 			processor := NewFileProcessor(file, general.Undefined, &bytes.Buffer{})
+			processor.Validated = true
 			assert.NoError(t, processor.Process())
-			assert.Equal(t, []string{"***", "***", "***"}, processor.RedactKeys(0, 3, []string{"static", "made-up-s3cret", "0"}))
-			assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"static"}), "the first call decides")
+			assert.Equal(t, []string{"***", "***", "***"}, processor.RedactKeys(0, 3, []string{"static", "made-up-s3cret", "0"}, digitIndexes([]string{"static", "made-up-s3cret", "0"})))
+			assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"static"}, digitIndexes([]string{"static"})), "the first call decides")
 		})
 	}
 }
@@ -259,11 +263,11 @@ func TestRedactKeysAliasExpansion(t *testing.T) {
 	processor := processedKeys(t, general.YAML, laughsYaml("p: &p \"${KEYS_TEST_PW}\"\n\"${KEYS_TEST_PW}\": 1\n", "[x,x,x,x,x,x,x,x,x,x]"))
 	assert.NotNil(t, processor.keyLocator, "the keys are located by RedactKeys only")
 	assert.Nil(t, processor.keys)
-	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-s3cret"}), "aliases without candidates are skipped")
-	assert.Equal(t, []string{"a7", "0", "1"}, processor.RedactKeys(0, 1, []string{"a7", "0", "1"}))
+	assert.Equal(t, []string{"***"}, processor.RedactKeys(0, 1, []string{"made-up-s3cret"}, digitIndexes([]string{"made-up-s3cret"})), "aliases without candidates are skipped")
+	assert.Equal(t, []string{"a7", "0", "1"}, processor.RedactKeys(0, 1, []string{"a7", "0", "1"}, digitIndexes([]string{"a7", "0", "1"})))
 
 	processor = processedKeys(t, general.YAML, laughsYaml("", "{\"${KEYS_TEST_PW}\": 1}"))
-	assert.Equal(t, []string{"***", "***"}, processor.RedactKeys(0, 1, []string{"a0", "made-up-s3cret"}), "the budget is exceeded")
+	assert.Equal(t, []string{"***", "***"}, processor.RedactKeys(0, 1, []string{"a0", "made-up-s3cret"}, digitIndexes([]string{"a0", "made-up-s3cret"})), "the budget is exceeded")
 
 	assert.Equal(t, 1000, yamlWalkBudget(0))
 	assert.Equal(t, 2000, yamlWalkBudget(10))
@@ -275,6 +279,7 @@ func TestCheckRecordsNoKeyCandidates(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config.yaml")
 	assert.NoError(t, os.WriteFile(file, []byte("${KEYS_TEST_PW}: 1\n"), 0o644))
 	processor := NewFileProcessor(file, general.Undefined, nil)
+	processor.Validated = true
 	_, err := processor.Check()
 	assert.NoError(t, err)
 	assert.Nil(t, processor.keyCandidates)
@@ -306,9 +311,10 @@ func TestRedactKeysUnsureDependency(t *testing.T) {
 
 	var output bytes.Buffer
 	processor := NewFileProcessor(file, general.Undefined, &output)
+	processor.Validated = true
 	assert.NoError(t, processor.Process())
-	wrongCount := func(document int, documents int, location []string) []string {
-		return processor.RedactKeys(document, documents+1, location)
+	wrongCount := func(document int, documents int, location []string, indexes []bool) []string {
+		return processor.RedactKeys(document, documents+1, location, indexes)
 	}
 	violations, err := sch.Validate(general.YAML, output.Bytes(), wrongCount)
 	assert.NoError(t, err)
@@ -321,7 +327,100 @@ func TestRedactKeysUnsureDependency(t *testing.T) {
 // are not kept in any case
 func TestKeyLocatorOfOtherHandlers(t *testing.T) {
 	processor := NewFileProcessor("config.xml", general.Undefined, nil)
+	processor.Validated = true
 	processor.keyCandidates = map[ConfigEntry]string{&XmlTextConfigEntry{}: "***"}
 	assert.Nil(t, processor.keyLocatorOf(NewXmlConfigFileHandler()))
 	assert.Nil(t, processor.keyCandidates)
+}
+
+// TestRedactKeysSafetyNet checks that keys the locator misses are masked since they are no keys of the input: a
+// sequence item tagged as a merge key, which the decoder skips, an anchor redefined by a fragment and an integer key
+// merged into a mapping with string keys, which the decoder keeps as written
+func TestRedactKeysSafetyNet(t *testing.T) {
+	t.Setenv("KEYS_TEST_PW", "made-up-s3cret")
+	t.Setenv("KEYS_TEST_FRAGMENT", `[&k "${KEYS_TEST_PW}"]`)
+	t.Setenv("KEYS_TEST_HEX", "0x5EC")
+
+	testCases := []struct {
+		desc    string
+		content string
+		schema  string
+		want    []string
+	}{
+		{desc: "merge tagged sequence item", content: "l:\n  - !!merge x\n  - {\"${KEYS_TEST_PW}\": 1}\n",
+			schema: `{"properties": {"l": {"items": {"additionalProperties": false}}}}`,
+			want:   []string{"l.0: additional properties '***' not allowed"}},
+		{desc: "anchor redefined by a fragment", content: "a: &k static-anchor\nf: ${KEYS_TEST_FRAGMENT | fragment}\nm:\n  *k : {c: x}\n",
+			schema: `{"properties": {"m": {"additionalProperties": {"additionalProperties": {"type": "integer"}}}}}`,
+			want:   []string{"m.***.c: got string, want integer"}},
+		{desc: "integer key merged into string keys", content: "base: &b {!!int \"${KEYS_TEST_HEX}\": 1}\nd:\n  s: 1\n  <<: *b\n",
+			schema: `{"properties": {"d": {"properties": {"s": {}}, "additionalProperties": false}}}`,
+			want:   []string{"d: additional properties '***' not allowed"}},
+		{desc: "static keys stay visible", content: "\"${KEYS_TEST_PW}\": 1\nstatic: {\"quoted.key\": x, !!int 0x1F: x}\n",
+			schema: `{"properties": {"static": {"additionalProperties": false}}}`,
+			want:   []string{"static: additional properties '31', 'quoted.key' not allowed"}},
+		{desc: "escaped placeholder stays visible", content: "$${ESC}: 1\n", schema: `{"additionalProperties": false}`,
+			want: []string{"(root): additional properties '${ESC}' not allowed"}},
+	}
+	for _, tC := range testCases {
+		t.Run(tC.desc, func(t *testing.T) {
+			assert.Equal(t, tC.want, redactedViolations(t, general.YAML, tC.content, tC.schema))
+		})
+	}
+}
+
+// TestProcessWithoutValidationRecordsNothing checks that Process records no keys unless the content is validated,
+// so processing costs nothing extra, and that RedactKeys masks every key but array indexes then
+func TestProcessWithoutValidationRecordsNothing(t *testing.T) {
+	t.Setenv("KEYS_TEST_PW", "made-up-s3cret")
+	for fileType, content := range map[general.FileType]string{
+		general.YAML: "${KEYS_TEST_PW}: 1\nstatic: [1]\n",
+		general.JSON: `{"${KEYS_TEST_PW}": 1, "static": [1]}`,
+		general.TOML: "\"${KEYS_TEST_PW}\" = 1\nstatic = [1]\n",
+	} {
+		t.Run(string(fileType), func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "config."+string(fileType))
+			assert.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+			processor := NewFileProcessor(file, general.Undefined, &bytes.Buffer{})
+			assert.NoError(t, processor.Process())
+			assert.Nil(t, processor.keyCandidates)
+			assert.Nil(t, processor.keyLocator)
+			assert.Nil(t, processor.staticKeys)
+			assert.Nil(t, processor.source)
+			assert.Equal(t, []string{"***", "0"}, processor.RedactKeys(0, 1, []string{"static", "0"}, []bool{false, true}))
+		})
+	}
+}
+
+// TestRecordStaticKeysOfFragments checks the keys recorded for fragments of TOML files, which are values or the
+// key/value pairs of a fragment used as a key, and that content that cannot be decoded records nothing
+func TestRecordStaticKeysOfFragments(t *testing.T) {
+	processor := NewFileProcessor("config.toml", general.Undefined, nil)
+	processor.recordStaticKeys([]byte(`{ a = { b = 1 } }`), true)
+	processor.recordStaticKeys([]byte("c = 1\nd.e = [{ f = 1 }]"), true)
+	processor.recordStaticKeys([]byte("[invalid"), true)
+	assert.Equal(t, map[string]struct{}{"a": {}, "b": {}, "c": {}, "d": {}, "e": {}, "f": {}}, processor.staticKeys)
+}
+
+// TestRedactKeysAnchoredScalarsOfFragments checks that anchored scalars of fragments, which are results of
+// placeholders, are not shown when an alias uses them as a key, while anchored scalars of the input are
+func TestRedactKeysAnchoredScalarsOfFragments(t *testing.T) {
+	const schemaText = `{"additionalProperties": {"additionalProperties": false}}`
+	// The keys of a fragment are shown, like the key q
+	for fragment, want := range map[string][]string{
+		"&s made-up-anchored-s3cret":      {"a: additional properties '***' not allowed"},
+		"{q: &s made-up-anchored-s3cret}": {"a: additional properties '***' not allowed", "f: additional properties 'q' not allowed"},
+	} {
+		t.Setenv("KEYS_TEST_FRAGMENT", fragment)
+		assert.Equal(t, want,
+			redactedViolations(t, general.YAML, "x: &s plain\nf: ${KEYS_TEST_FRAGMENT | fragment}\na: {*s : 1}\n", schemaText), fragment)
+	}
+
+	t.Setenv("KEYS_TEST_FRAGMENT", "{v: &a made-up-anchored-s3cret, m: {*a : 1}}")
+	assert.Equal(t, []string{"f.m: additional properties '***' not allowed"},
+		redactedViolations(t, general.YAML, "f: ${KEYS_TEST_FRAGMENT | fragment}\n",
+			`{"properties": {"f": {"properties": {"m": {"additionalProperties": false}}}}}`))
+
+	assert.Equal(t, []string{"a: additional properties 'plain' not allowed"},
+		redactedViolations(t, general.YAML, "x: &s plain\na: {*s : 1}\n", schemaText))
 }
