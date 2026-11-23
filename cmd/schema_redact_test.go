@@ -117,8 +117,8 @@ func TestSchemaViolationKeysNotLeakedBetweenFiles(t *testing.T) {
 
 // TestSchemaViolationsHideKeysOfAliasesTagsAndInvalidUTF8 checks that keys produced by placeholders are masked in
 // process and check, in text and JSON reports, when they are YAML aliases of processed values, have YAML tags or
-// contain invalid UTF-8, and that static keys and indexes equal to a processed key stay visible, unless --log-values
-// is set
+// contain invalid UTF-8, follow merge keys in sequences, anchors redefined by fragments or anchored values of
+// fragments, and that static keys and indexes equal to a processed key stay visible, unless --log-values is set
 func TestSchemaViolationsHideKeysOfAliasesTagsAndInvalidUTF8(t *testing.T) {
 	const closed = `{"properties": {"a": {}}, "additionalProperties": false}`
 	testCases := []struct {
@@ -180,6 +180,39 @@ func TestSchemaViolationsHideKeysOfAliasesTagsAndInvalidUTF8(t *testing.T) {
 			content: "base: &b {!!int \"${SCHEMA_KEY_PW}\": 1}\nd:\n  s: 1\n  <<: *b\n",
 			schema:  `{"properties": {"d": {"properties": {"s": {}}, "additionalProperties": false}}}`,
 			want:    []string{"additional properties '***' not allowed"}, hidden: []string{"0x5EC"}},
+		{name: "merge tagged sequence item before a key equal to a static key",
+			env: map[string]string{"SCHEMA_KEY_PW": "made-up-same-key"}, file: "c.yaml",
+			content: "public: {made-up-same-key: 1}\nl:\n  - !!merge x\n  - {\"${SCHEMA_KEY_PW}\": 1}\n",
+			schema:  `{"properties": {"l": {"items": {"additionalProperties": false}}}}`,
+			want:    []string{"additional properties '***' not allowed"}, hidden: []string{"made-up-same-key"}},
+		{name: "merge tagged sequence item before a static key and a processed key",
+			env: map[string]string{"SCHEMA_KEY_PW": "made-up-same-key"}, file: "c.yaml",
+			content: "l:\n  - !!merge x\n  - {made-up-same-key: 1}\n  - {\"${SCHEMA_KEY_PW}\": 1}\n",
+			schema:  `{"properties": {"l": {"items": {"additionalProperties": false}}}}`,
+			want:    []string{"l.0", "additional properties 'made-up-same-key' not allowed", "l.1", "additional properties '***' not allowed"}},
+		{name: "anchor redefined by a fragment with a value equal to a static key",
+			env: map[string]string{"SCHEMA_KEY_PW": "made-up-public-key", "SCHEMA_KEY_FR": `[&k "${SCHEMA_KEY_PW}"]`}, file: "c.yaml",
+			content: "a: &k static-anchor\nf: ${SCHEMA_KEY_FR | fragment}\nm:\n  *k : {c: x}\nmade-up-public-key: 1\n",
+			schema:  `{"properties": {"m": {"additionalProperties": {"additionalProperties": {"type": "integer"}}}}}`,
+			want:    []string{"m.***.c"}, hidden: []string{"m.made-up-public-key"}},
+		{name: "integer key merged into string keys equal to a static key", env: map[string]string{"SCHEMA_KEY_PW": "0x5EC"},
+			file:    "c.yaml",
+			content: "base: &b {!!int \"${SCHEMA_KEY_PW}\": 1}\nd:\n  s: 1\n  <<: *b\nother: {\"0x5EC\": 1}\n",
+			schema:  `{"properties": {"d": {"properties": {"s": {}}, "additionalProperties": false}}}`,
+			want:    []string{"additional properties '***' not allowed"}, hidden: []string{"'0x5EC'"}},
+		{name: "integer key merged into string keys with a static key of its text merged as well",
+			env: map[string]string{"SCHEMA_KEY_PW": "0x5EC"}, file: "c.yaml",
+			content: "b: &b {!!int \"${SCHEMA_KEY_PW}\": 1}\nc: &c {\"0x5EC\": 1}\nd:\n  s: 1\n  <<: [*b, *c]\n",
+			schema:  `{"properties": {"d": {"properties": {"s": {}}, "additionalProperties": false}}}`,
+			want:    []string{"additional properties '***' not allowed"}, hidden: []string{"'0x5EC'"}},
+		{name: "escaped anchored scalar of a fragment", env: map[string]string{"SCHEMA_KEY_FR": `{v: &a "made-up-anchored-s3cret-$${ESC}", m: {*a : 1}}`},
+			file: "c.yaml", content: "f: ${SCHEMA_KEY_FR | fragment}\n",
+			schema: `{"properties": {"f": {"properties": {"m": {"additionalProperties": false}}}}}`,
+			want:   []string{"additional properties '***' not allowed"}, hidden: []string{"made-up-anchored-s3cret"}},
+		{name: "anchored scalar of a fragment equal to a static key", env: map[string]string{"SCHEMA_KEY_FR": "{v: &a made-up-public-key, m: {*a : 1}}"},
+			file: "c.yaml", content: "f: ${SCHEMA_KEY_FR | fragment}\nmade-up-public-key: 1\n",
+			schema: `{"properties": {"f": {"properties": {"m": {"additionalProperties": false}}}}}`,
+			want:   []string{"additional properties '***' not allowed"}, hidden: []string{"'made-up-public-key'"}},
 	}
 	for _, tC := range testCases {
 		t.Run(tC.name, func(t *testing.T) {

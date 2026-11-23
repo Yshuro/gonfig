@@ -361,7 +361,8 @@ func (fp *FileProcessor) applyEntry(entry ConfigEntry, current string, allowFrag
 		return fp.insertFragment(entry, fragment, allowFragments, fileGroup)
 	}
 
-	fp.recordKeyCandidate(entry, current)
+	// Only the entries of fragments are processed with fragments disabled
+	fp.recordKeyCandidate(entry, current, !allowFragments)
 
 	newText, ok := newVal.(string)
 	if !ok {
@@ -414,6 +415,7 @@ func (fp *FileProcessor) insertFragment(entry ConfigEntry, fragment filter.Fragm
 			return err
 		}
 	}
+	fp.recordFragmentValues(inserted)
 
 	// The fragment may contain secrets, so only its structure is shown, e.g. the keys of mappings.
 	// Values that failed to process are masked as well, since their text is part of the fragment.

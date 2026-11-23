@@ -490,11 +490,12 @@ func (t *TomlFileHandler) Write(destination io.Writer) error {
 			return err
 		}
 	}
-	// The entries of the masks may refer to the document as read, which is not needed to locate the keys
-	keys.masks = nil
-	if len(keys.positions) > 0 {
+	// The static keys are located as well, so the written document is kept whenever keys are located, see keyLocator
+	if keys.masks != nil {
 		keys.written = result.Bytes()[keys.base:]
 	}
+	// The entries of the masks may refer to the document as read, which is not needed to locate the keys
+	keys.masks = nil
 
 	_, err = destination.Write(result.Bytes())
 	return err
@@ -585,7 +586,7 @@ type tomlWrittenKeys struct {
 	base int
 	// positions are the masked texts of the keys by their position in the written document
 	positions map[int]string
-	// written is the written document without the BOM if it has keys produced by placeholders
+	// written is the written document without the BOM if the keys are located, which includes the static keys
 	written []byte
 }
 

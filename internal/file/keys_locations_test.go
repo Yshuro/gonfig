@@ -159,6 +159,14 @@ func TestRedactKeysAliasCycleGuard(t *testing.T) {
 		locationKey(0, []string{"a", "b", "k"}): "***",
 		// The sequence is computed while a is, so it must not be skipped as without candidates
 		locationKey(0, []string{"a", "c", "0", "k"}): "***",
+		// The static keys are located as well, up to where the guard stops the walk
+		locationKey(0, []string{"a"}):                "",
+		locationKey(0, []string{"a", "b"}):           "",
+		locationKey(0, []string{"a", "c"}):           "",
+		locationKey(0, []string{"a", "b", "b"}):      "",
+		locationKey(0, []string{"a", "b", "c"}):      "",
+		locationKey(0, []string{"a", "c", "0", "b"}): "",
+		locationKey(0, []string{"a", "c", "0", "c"}): "",
 	}, locations)
 }
 
