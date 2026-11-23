@@ -197,15 +197,18 @@ records and locates keys if its output is validated (`FileProcessor.Validated`, 
   unchanged. Times are within the noise (YAML, YAML anchors, shared anchors, TOML inline and dotted), TOML tables take
   3 to 6% longer. Only `json/keys/16000` is 20% slower (148 vs 177 ms, reproduced with 10 runs), while 1000 and 4000
   entries are not significantly different and allocations are identical.
-- With a schema, the input is read fully, the keys of the input and of fragments are recorded and the keys produced by
-  placeholders are located when a violation is reported. This costs 11 to 21% more time for YAML keys and anchors, 34 to
-  51% for JSON, 31 to 45% for TOML and 42 to 45% for YAML with shared anchors. Allocations grow by 23 to 26% (33 to 34% for
-  shared anchors) and B/op by 13 to 28%.
-- Scaling is the same as on main: with a schema, 4 times the entries take 4.1 to 4.7 times the time for JSON and 4.4 for
-  shared YAML anchors, 5.0 and 8.1 times for YAML keys (5.4 and 7.9 on main) and 6.6 and 9.8 times for YAML anchors
-  (7.1 and 9.4 on main). Without a schema, YAML takes 3.6 to 4.1 times and JSON 4.4 to 5.2 times.
+- With a schema, the input is read fully, the keys of the whole written document (static keys as "", keys produced by
+  placeholders masked) and of fragments are recorded, and the keys produced by placeholders are located when a violation
+  is reported (JSON locates them before writing). This costs 9 to 27% more time for YAML keys and anchors (9 to 12% at
+  4000 and 16000 entries), 31 to 51% for JSON, 31 to 37% for TOML and 27 to 37% for YAML with shared anchors. Allocations
+  grow by 20% for JSON, 25 to 30% for YAML keys, anchors and TOML and by 34% for shared anchors, B/op by 15 to 29%.
+  Compared to the commit before the whole-document recording the times are unchanged (within the noise, TOML inline
+  2 to 3% slower), B/op grows by 0.3 to 2.2% and allocations by 0.3 to 2.8% (JSON 3% fewer).
+- Scaling is the same as on main: with a schema, 4 times the entries take 4.0 to 4.8 times the time for JSON and 4.7 for
+  shared YAML anchors, 4.9 and 7.8 times for YAML keys (5.5 and 8.0 on main) and 6.4 and 10.1 times for YAML anchors
+  (6.8 and 10.2 on main). Without a schema, YAML takes 3.7 to 4.4 times and JSON 4.4 to 5.3 times.
 
-Peak heap (main to branch, `-count=6`):
+Peak heap (main to branch, `-count=6`, not measured again after recording the whole document, B/op grew by at most 2.2% since):
 
 - Files without key placeholders are unchanged: `yaml/static` 94.4 vs 94.0 MiB, `json/static` 27.8 vs 27.9 MiB,
   `toml/placeholders` 20.2 vs 20.3 MiB (not significant).
