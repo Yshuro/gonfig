@@ -667,6 +667,8 @@ The fragment is merged deeply:
 - **Other values**, like scalars and lists, are replaced by the ones of the fragment.
 - **Comments and key order** of the file are kept, and new keys are appended in the order of the fragment.
 
+Keys of the file with placeholders are matched as they are when the fragment is inserted, so the order matters. A key before the fragment's key is already processed and matched by its result, while a key after it is matched as written, like `${NAME}`, and gets its processed name afterwards.
+
 In JSON files, the key has to have the value `null`, e.g. `"${DB_OVERRIDES | fragment}": null`. XML files support fragments only as the content of elements.
 
 In TOML files, the key has to be the only key of a key/value pair with an empty string as its value, in a table, not in an inline table or a header. The fragment consists of key/value pairs, without table headers:
