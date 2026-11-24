@@ -568,3 +568,24 @@ host = "db.prod"
 result:
 error: failed to insert the fragment of ${FRAGMENT | fragment} in config.toml: a fragment used as a key in a TOML file must be the only key of a key/value pair outside inline tables, with an empty string as its value, e.g. "${X | fragment}" = ""
 ---
+
+[TestFragmentSnapshots/json_key_fragment_replacing_the_value_of_a_placeholder_key - 1]
+file (config.json):
+{
+  "${FRAGMENT | fragment}": null,
+  "${FRAGMENT_SECRET}": {"old": true},
+  "keep": "${FRAGMENT_PORT}"
+}
+
+FRAGMENT:
+{"${FRAGMENT_SECRET}": {"new": "${FRAGMENT_PORT}"}}
+
+result:
+{
+  "s3cret": {
+    "old": true,
+    "new": "8080"
+  },
+  "keep": "8080"
+}
+---
