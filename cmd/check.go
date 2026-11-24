@@ -109,6 +109,7 @@ placeholders and the values inserted by fragments are shown as *** unless --log-
 func validateChecked(report *file.CheckReport, processor *file.FileProcessor, schemas []*schema.Schema) {
 	var processed bytes.Buffer
 	processor.Output = &processed
+	processor.Validated = true
 	if err := processor.Process(); err != nil {
 		// The check found no problems, so processing only fails if the file changed in the meantime
 		report.Error = err.Error()
@@ -116,7 +117,7 @@ func validateChecked(report *file.CheckReport, processor *file.FileProcessor, sc
 	}
 
 	for _, sch := range schemas {
-		violations, err := sch.Validate(processor.FileType, processed.Bytes())
+		violations, err := sch.Validate(processor.FileType, processed.Bytes(), processor.RedactKeys)
 		if err != nil {
 			report.Error = fmt.Sprintf("failed to validate %s: %v", report.File, err)
 			return

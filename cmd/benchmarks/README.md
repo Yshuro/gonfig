@@ -9,6 +9,7 @@ Benchmarks for processing config files and single values.
 | `BenchmarkProcessValue/<case>` | Finding placeholders and executing filter chains for a single value |
 | `BenchmarkProcessYAMLScaling/<static\|placeholders>/<n>` | Processing a YAML file with `n` entries (1,000, 4,000 and 16,000) to check for linear scaling: 4 times the entries take about 4 times the time, memory and allocations (measured 3.8 to 4.3 times per step) |
 | `BenchmarkProcessFragment/<type>/<mode>/<n>` | Inserting a [fragment](../../FILTERS.md#fragments) with `n` keys or XML elements as a value (`value`), or merging it into a mapping with `n` keys (`merge`) |
+| `BenchmarkProcessKeysScaling/<format>/<process\|schema>/<n>` | Files with `n` entries (1,000, 4,000 and 16,000) whose keys contain placeholders: `yaml/keys`, `yaml/anchors` (merged anchors), `yaml/shared-anchor` (one anchor merged and aliased by every entry), `json/keys`, `toml/dotted`, `toml/tables` and `toml/inline`. `process` only processes the file, `schema` also validates the result against a schema that every entry violates and redacts the keys of the violations, like `config process --schema` |
 
 The difference between `static` and `placeholders` shows the cost of the placeholders compared to reading and writing the file.
 
@@ -185,3 +186,41 @@ The plugin is started once per run of gonfig, so its startup time is added once,
   Caching parsed placeholders would only help for placeholders used repeatedly, a dedicated parser would avoid the allocations in general.
 - **Streaming:** Files are read into memory as a whole, because all supported libraries parse complete documents and gonfig must not write any output if a value fails to process.
   The peak heap size of 10 to 23 MiB for 1 MiB files of all types except YAML is acceptable for config files, so streaming is not worth the added complexity.
+
+### Keys with placeholders (#438)
+
+Keys produced by placeholders are masked in schema violations (`BenchmarkProcessKeysScaling`). The processor only
+records and locates keys if its output is validated (`FileProcessor.Validated`, set by `config process --schema` and
+`config check`). Compared to main (6 runs each):
+
+- Without a schema, processing allocates exactly the same (B/op and allocs/op) for all formats, and the peak heap is
+  unchanged. Times are within the noise (YAML, YAML anchors, shared anchors, TOML inline and dotted), TOML tables take
+  3 to 6% longer. Only `json/keys/16000` is 20% slower (148 vs 177 ms, reproduced with 10 runs), while 1000 and 4000
+  entries are not significantly different and allocations are identical.
+- With a schema, the input is read fully, the keys of the whole written document (static keys as "", keys produced by
+  placeholders masked) and of fragments are recorded, and the keys produced by placeholders are located when a violation
+  is reported (JSON locates them before writing). This costs 9 to 27% more time for YAML keys and anchors (9 to 12% at
+  4000 and 16000 entries), 31 to 51% for JSON, 31 to 37% for TOML and 27 to 37% for YAML with shared anchors. Allocations
+  grow by 20% for JSON, 25 to 30% for YAML keys, anchors and TOML and by 34% for shared anchors, B/op by 15 to 29%.
+  Compared to the commit before the whole-document recording the times are unchanged (within the noise, TOML inline
+  2 to 3% slower), B/op grows by 0.3 to 2.2% and allocations by 0.3 to 2.8% (JSON 3% fewer).
+- Scaling is the same as on main: with a schema, 4 times the entries take 4.0 to 4.8 times the time for JSON and 4.7 for
+  shared YAML anchors, 4.9 and 7.8 times for YAML keys (5.5 and 8.0 on main) and 6.4 and 10.1 times for YAML anchors
+  (6.8 and 10.2 on main). Without a schema, YAML takes 3.7 to 4.4 times and JSON 4.4 to 5.3 times.
+
+Peak heap (main to branch, `-count=6`, not measured again after recording the whole document, B/op grew by at most 2.2% since):
+
+- Files without key placeholders are unchanged: `yaml/static` 94.4 vs 94.0 MiB, `json/static` 27.8 vs 27.9 MiB,
+  `toml/placeholders` 20.2 vs 20.3 MiB (not significant).
+- With key placeholders and no schema, the peak heap is unchanged for all formats and sizes.
+- With a schema, it grows by 4 to 5% for YAML keys (not significant at 16000 entries) and by 13 to 16% for shared
+  anchors, by 16%, 22% and 30% for `json/keys` (1000, 4000 and 16000 entries), by 8 to 14% (1000 entries) up to 31 to 44%
+  (16000) for the TOML variants.
+
+The benchmark also shows behavior that exists on main as well: TOML files with many top-level tables or dotted keys scale
+quadratically (7.5 to 12 times per 4 times the entries, 1.1 to 2.1 s for 16,000 entries, tracked in [#444](https://github.com/denglertai/gonfig/issues/444)), because the TOML library
+checks every key against all its siblings (`SeenTracker.find` of go-toml) while reading and again while checking renamed
+keys when writing. The 1 MiB TOML benchmarks use an array of tables, which does not trigger it. Validating YAML with
+aliases that expand to a large document (`yaml/shared-anchor/schema/16000`) exceeds the alias limit of the YAML decoder on
+main and on the branch, so that combination is skipped.
+Validation of YAML with anchors takes 6.9 and 10 times per step already on main.

@@ -296,6 +296,42 @@ func TestProcessValueEdgeCases(t *testing.T) {
 	}
 }
 
+// TestMaskPlaceholders checks that placeholders are masked and escape sequences unescaped like by ProcessMaskedValue,
+// without running filters, so unknown filters and missing variables don't matter
+func TestMaskPlaceholders(t *testing.T) {
+	testCases := []struct {
+		value string
+		want  string
+	}{
+		{value: "plain", want: "plain"},
+		{value: "${MASK_TEST_MISSING}", want: Mask},
+		{value: "pre_${MASK_TEST_MISSING | nofilter}_post", want: "pre_***_post"},
+		{value: "${A}.${B}", want: "***.***"},
+		{value: "$${A}=${B}", want: "${A}=***"},
+		{value: "$$${A}", want: "$***"},
+		{value: "pre_${A", want: Mask},
+	}
+	for _, tC := range testCases {
+		assert.Equal(t, tC.want, MaskPlaceholders(tC.value), tC.value)
+	}
+}
+
+// TestMaskPlaceholdersEqualsProcessMaskedValue checks that keys look the same in schema violations as in the diff of
+// check, which masks with ProcessMaskedValue, and that unknown filters and missing variables don't matter
+func TestMaskPlaceholdersEqualsProcessMaskedValue(t *testing.T) {
+	for _, in := range []string{
+		"${MASK_EQ_A}", "pre_${MASK_EQ_A}", "${MASK_EQ_A}.${MASK_EQ_B}_x", "${MASK_EQ_A | upper}",
+		"${MASK_EQ_A | default(x)}", "$${MASK_EQ_A}", "$${A}_${MASK_EQ_A}", "$$${MASK_EQ_A}", "a$b", "$", "${}$",
+		`${MASK_EQ_A | replace(\},x)}`,
+	} {
+		masked, err := ProcessMaskedValue(in)
+		if !assert.NoError(t, err, in) {
+			continue
+		}
+		assert.Equal(t, masked, MaskPlaceholders(in), in)
+	}
+}
+
 // TestFindPlaceholders checks the placeholders found within a value, of which escaped closing brackets are part
 func TestFindPlaceholders(t *testing.T) {
 	placeholders, err := findPlaceholders(`a ${A} b ${B|replace(\},x)}`)

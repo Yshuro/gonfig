@@ -120,12 +120,14 @@ skips such files with a warning instead and writes the others. It has no effect 
 			var o = new(bytes.Buffer)
 			logging.Debug("Processing file", "file", input, "type", configSettings.FileType)
 			processor := newFileProcessor(cmd, input, configSettings.FileType, o)
+			// Keys produced by placeholders are only recorded for files validated against a schema, see RedactKeys
+			processor.Validated = len(schemas[input]) > 0
 			if err := processor.Process(); err != nil {
 				return err
 			}
 			// Files are validated before any is written, so a file not matching the schema leaves all files unchanged
 			for _, sch := range schemas[input] {
-				if err := sch.Check(processor.FileName, processor.FileType, o.Bytes()); err != nil {
+				if err := sch.Check(processor.FileName, processor.FileType, o.Bytes(), processor.RedactKeys); err != nil {
 					return err
 				}
 			}

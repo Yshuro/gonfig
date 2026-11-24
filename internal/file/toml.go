@@ -28,6 +28,8 @@ type TomlFileHandler struct {
 	entries []*TomlConfigEntry
 	// bom is set if the file starts with a UTF-8 byte order mark, which go-toml rejects
 	bom bool
+	// writtenKeys records the positions of the keys produced by placeholders when writing, see keyLocator
+	writtenKeys *tomlWrittenKeys
 }
 
 // TomlConfigEntry is a configuration entry for TOML files: a string value, or a key containing a placeholder.
@@ -477,11 +479,23 @@ func (t *TomlFileHandler) Write(destination io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if keyChanged := spliceToml(&result, t.data, t.entries); keyChanged {
+	// The handler is not referenced after splicing, so the document as read can be freed while the result is written
+	keys := t.writtenKeys
+	if keys == nil {
+		keys = &tomlWrittenKeys{}
+	}
+	keys.base = result.Len()
+	if keyChanged := spliceToml(&result, t.data, t.entries, keys); keyChanged {
 		if err := checkRenamedKeys(bytes.TrimPrefix(result.Bytes(), utf8BOM), keyFragments); err != nil {
 			return err
 		}
 	}
+	// The static keys are located as well, so the written document is kept whenever keys are located, see keyLocator
+	if keys.masks != nil {
+		keys.written = result.Bytes()[keys.base:]
+	}
+	// The entries of the masks may refer to the document as read, which is not needed to locate the keys
+	keys.masks = nil
 
 	_, err = destination.Write(result.Bytes())
 	return err
@@ -511,7 +525,7 @@ func (t *TomlFileHandler) checkOverrides() (bool, error) {
 // including the keys within fragments. The entries are ordered by their position. A pair removed by an empty fragment
 // contains the entry of a renamed key before it, so ranges within a range replaced before are skipped, with ranges starting at the same position ordered
 // by their length, the longest first.
-func spliceToml(result *bytes.Buffer, source []byte, entries []*TomlConfigEntry) bool {
+func spliceToml(result *bytes.Buffer, source []byte, entries []*TomlConfigEntry, keys *tomlWrittenKeys) bool {
 	type replacement struct {
 		entry *TomlConfigEntry
 		span  tomlRange
@@ -519,7 +533,12 @@ func spliceToml(result *bytes.Buffer, source []byte, entries []*TomlConfigEntry)
 		override *tomlFragment
 	}
 	var replacements []replacement
+	// unchanged are the keys written as read, which are recorded as well, see tomlWrittenKeys.copied
+	var unchanged []*TomlConfigEntry
 	for _, entry := range entries {
+		if !entry.changed() && entry.isKey && len(keys.masks) > 0 {
+			unchanged = append(unchanged, entry)
+		}
 		if entry.changed() {
 			replacements = append(replacements, replacement{entry: entry, span: entry.span(source)})
 			if entry.fragment != nil {
@@ -541,16 +560,59 @@ func spliceToml(result *bytes.Buffer, source []byte, entries []*TomlConfigEntry)
 		if r.span.start < written {
 			continue
 		}
+		unchanged = keys.copied(result.Len(), written, r.span.start, unchanged)
 		result.Write(source[written:r.span.start])
 		if r.override != nil {
-			keyChanged = spliceToml(result, r.override.text, r.override.entries) || keyChanged
+			keyChanged = spliceToml(result, r.override.text, r.override.entries, keys) || keyChanged
 		} else {
-			keyChanged = r.entry.write(result) || r.entry.isKey || keyChanged
+			if r.entry.isKey && r.entry.fragment == nil {
+				keys.add(result.Len(), r.entry)
+			}
+			keyChanged = r.entry.write(result, keys) || r.entry.isKey || keyChanged
 		}
 		written = r.span.end
 	}
+	keys.copied(result.Len(), written, len(source), unchanged)
 	result.Write(source[written:])
 	return keyChanged
+}
+
+// tomlWrittenKeys records the positions spliceToml writes the keys produced by placeholders at, see
+// TomlFileHandler.keyLocator
+type tomlWrittenKeys struct {
+	// masks are the masked texts of the keys produced by placeholders, which are recorded, or nil to record nothing
+	masks map[*TomlConfigEntry]string
+	// base is the length of the BOM written before the document, which the positions don't include
+	base int
+	// positions are the masked texts of the keys by their position in the written document
+	positions map[int]string
+	// written is the written document without the BOM if the keys are located, which includes the static keys
+	written []byte
+}
+
+// copied adds the unchanged keys within the range of the source that is copied to the position of the result and
+// returns the keys after it. The keys are ordered by their position, and keys before the range are within a replaced
+// range, so they are not written.
+func (k *tomlWrittenKeys) copied(position int, start int, end int, unchanged []*TomlConfigEntry) []*TomlConfigEntry {
+	for len(unchanged) > 0 && unchanged[0].offset < end {
+		if offset := unchanged[0].offset; offset >= start {
+			k.add(position+offset-start, unchanged[0])
+		}
+		unchanged = unchanged[1:]
+	}
+	return unchanged
+}
+
+// add records the key written at the position of the result, which includes the BOM, if it is produced by placeholders
+func (k *tomlWrittenKeys) add(position int, entry *TomlConfigEntry) {
+	masked, ok := k.masks[entry]
+	if !ok {
+		return
+	}
+	if k.positions == nil {
+		k.positions = make(map[int]string)
+	}
+	k.positions[position-k.base] = masked
 }
 
 // boolRank returns 0 for false and 1 for true, to sort by a condition
@@ -716,9 +778,9 @@ func (c *tomlCollector) add(node *unstable.Node, key string, path string, isKey 
 
 // write writes the TOML text replacing the entry: the fragment with its changed entries, nothing for an empty fragment,
 // or the encoded value. It returns whether a key within the fragment changed.
-func (t *TomlConfigEntry) write(result *bytes.Buffer) bool {
+func (t *TomlConfigEntry) write(result *bytes.Buffer, keys *tomlWrittenKeys) bool {
 	if t.fragment != nil {
-		return spliceToml(result, t.fragment.text, t.fragment.entries)
+		return spliceToml(result, t.fragment.text, t.fragment.entries, keys)
 	}
 	result.WriteString(t.encode())
 	return false

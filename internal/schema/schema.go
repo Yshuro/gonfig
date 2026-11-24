@@ -94,9 +94,18 @@ func Load(path string) (*Schema, error) {
 	return &Schema{schema: compiled, name: path}, nil
 }
 
-// Check validates the processed content of the file and returns an *Error listing the violations if it does not match
-func (s *Schema) Check(file string, fileType general.FileType, data []byte) error {
-	violations, err := s.Validate(fileType, data)
+// KeyRedactor returns the location of a value within a document, given as its keys and array indexes like
+// jsonschema.ValidationError.InstanceLocation, with the keys produced by placeholders masked, e.g. "***" or "pre_***".
+// document is the index of the document and documents the number of documents decoded from the content, which differ
+// from 0 and 1 for YAML files with several documents only. indexes tells for every part of the location whether it is
+// the index of an array item rather than a key, as found in the decoded document. It must return a new slice of the
+// same length.
+type KeyRedactor func(document int, documents int, location []string, indexes []bool) []string
+
+// Check validates the processed content of the file and returns an *Error listing the violations if it does not match.
+// redactKeys hides keys produced by placeholders in the violations, see Validate.
+func (s *Schema) Check(file string, fileType general.FileType, data []byte, redactKeys KeyRedactor) error {
+	violations, err := s.Validate(fileType, data, redactKeys)
 	if err != nil {
 		return fmt.Errorf("failed to validate %s against the schema %s: %w", file, s.name, err)
 	}
@@ -109,10 +118,19 @@ func (s *Schema) Check(file string, fileType general.FileType, data []byte) erro
 // Validate validates the processed content of a file of the type and returns the violations, ordered by their path.
 // Every document of a YAML file is validated. It returns an error if the type is not supported or the content
 // cannot be decoded.
-func (s *Schema) Validate(fileType general.FileType, data []byte) ([]Violation, error) {
+//
+// Keys may be produced by placeholders and contain secrets, so unless values are allowed in errors, the paths of the
+// violations and the keys named by their messages are passed through redactKeys, e.g. file.FileProcessor.RedactKeys.
+// Keys are redacted by their location rather than their text, so a static key equal to a processed one stays visible.
+// A nil redactKeys keeps the keys.
+func (s *Schema) Validate(fileType general.FileType, data []byte, redactKeys KeyRedactor) ([]Violation, error) {
 	documents, err := decode(fileType, data)
 	if err != nil {
 		return nil, err
+	}
+
+	if redactKeys == nil || filter.ValuesInErrors() {
+		redactKeys = func(_ int, _ int, location []string, _ []bool) []string { return slices.Clone(location) }
 	}
 
 	var violations []Violation
@@ -125,20 +143,25 @@ func (s *Schema) Validate(fileType general.FileType, data []byte) ([]Violation, 
 		// The validator returns a *ValidationError for every violation, including values of types it doesn't support
 		var validationError *jsonschema.ValidationError
 		if errors.As(s.schema.Validate(document), &validationError) {
-			violations = appendViolations(violations, validationError, prefix)
+			redact := func(location []string) []string {
+				return redactKeys(i, len(documents), location, arrayIndexes(document, location))
+			}
+			violations = appendViolations(violations, validationError, prefix, redact)
 		}
 	}
 	return violations, nil
 }
 
 // appendViolations appends the causes of the validation error without further causes, which are the actual violations.
-// The validator collects the causes of objects in the order of a map, so they are sorted to report them consistently.
-func appendViolations(violations []Violation, validationError *jsonschema.ValidationError, prefix string) []Violation {
+// Their paths are passed through redact, see KeyRedactor. The validator collects the causes of objects in the order of
+// a map, so they are sorted to report them consistently.
+func appendViolations(violations []Violation, validationError *jsonschema.ValidationError, prefix string, redact func(location []string) []string) []Violation {
 	start := len(violations)
 	var collect func(e *jsonschema.ValidationError)
 	collect = func(e *jsonschema.ValidationError) {
 		if len(e.Causes) == 0 {
-			violations = append(violations, Violation{Path: prefix + strings.Join(e.InstanceLocation, "."), Message: describe(e.ErrorKind)})
+			path := strings.Join(redact(e.InstanceLocation), ".")
+			violations = append(violations, Violation{Path: prefix + path, Message: describe(e.ErrorKind, e.InstanceLocation, redact)})
 			return
 		}
 		for _, cause := range e.Causes {
@@ -153,17 +176,52 @@ func appendViolations(violations []Violation, validationError *jsonschema.Valida
 	return violations
 }
 
+// arrayIndexes returns for every part of the location within the document whether it is the index of an array item.
+// Parts beyond the document, e.g. the name of a missing property, are keys.
+func arrayIndexes(document any, location []string) []bool {
+	indexes := make([]bool, len(location))
+	current := document
+	for i, part := range location {
+		switch value := current.(type) {
+		case []any:
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(value) {
+				return indexes
+			}
+			indexes[i], current = true, value[index]
+		case map[string]any:
+			current = value[part]
+		default:
+			return indexes
+		}
+	}
+	return indexes
+}
+
 // printer formats the messages of the validator in English
 var printer = message.NewPrinter(language.English)
 
 // describe returns the message of the violation. The messages of the validator include the value for some keywords,
 // e.g. "'s3cret' does not match pattern '^[a-z]{12}$'", and values may be secrets. Unless values are allowed in errors,
-// these keywords get messages naming the requirement only. Numbers get own messages in any case, since the validator
-// formats them with digit grouping, e.g. 65,535.
-func describe(errorKind jsonschema.ErrorKind) string {
+// these keywords get messages naming the requirement only. The same applies to lengths, which reveal the length of
+// secrets, and to the keys of the object at location named by messages, which are passed through redact, see
+// KeyRedactor. Numbers get own messages in any case, since the validator formats them with digit grouping, e.g. 65,535.
+func describe(errorKind jsonschema.ErrorKind, location []string, redact func(location []string) []string) string {
 	var requirement string
 	var got *big.Rat
 	switch k := errorKind.(type) {
+	case *kind.MinLength:
+		requirement = fmt.Sprintf("length must be >= %d", k.Want)
+	case *kind.MaxLength:
+		requirement = fmt.Sprintf("length must be <= %d", k.Want)
+	case *kind.AdditionalProperties:
+		requirement = fmt.Sprintf("additional properties %s not allowed", quoteKeys(k.Properties, location, redact))
+	case *kind.PropertyNames:
+		requirement = fmt.Sprintf("invalid propertyName %s", quoteKeys([]string{k.Property}, location, redact))
+	case *kind.Dependency:
+		requirement = dependencyMessage(k.Missing, k.Prop, location, redact)
+	case *kind.DependentRequired:
+		requirement = dependencyMessage(k.Missing, k.Prop, location, redact)
 	case *kind.Pattern:
 		requirement = fmt.Sprintf("value does not match pattern '%s'", k.Want)
 	case *kind.Format:
@@ -192,6 +250,43 @@ func describe(errorKind jsonschema.ErrorKind) string {
 	}
 }
 
+// quoteKeys returns the keys of the object at location, passed through redact, sorted and quoted like in the messages
+// of the validator, e.g. "'a', '***'". The validator collects them in the order of a map, so they are sorted to report
+// them consistently.
+func quoteKeys(keys []string, location []string, redact func(location []string) []string) string {
+	quoted := make([]string, len(keys))
+	for i, key := range keys {
+		redacted := redact(append(slices.Clip(location), key))
+		quoted[i] = quote(redacted[len(redacted)-1])
+	}
+	slices.Sort(quoted)
+	return strings.Join(quoted, ", ")
+}
+
+// dependencyMessage returns the message of dependencies and dependentRequired like the validator: the missing
+// properties, which are names of the schema absent from the object at location, and the existing property, which is
+// a key of the object and passed through redact, e.g. "properties 'pw' required, if '***' exists"
+func dependencyMessage(missing []string, property string, location []string, redact func(location []string) []string) string {
+	quoted := make([]string, len(missing))
+	for i, name := range missing {
+		quoted[i] = quote(name)
+	}
+	return fmt.Sprintf("properties %s required, if %s exists", strings.Join(quoted, ", "), quoteKeys([]string{property}, location, redact))
+}
+
+// quote quotes the key in single quotes like the validator, which escapes like Go and single quotes by a backslash
+func quote(key string) string {
+	quoted := strconv.Quote(key)
+	quoted = strings.ReplaceAll(quoted[1:len(quoted)-1], `\"`, `"`)
+	return "'" + strings.ReplaceAll(quoted, "'", `\'`) + "'"
+}
+
+// KeyText returns the text of a decoded YAML key that is no string, e.g. 1000 for "!!float 1e3", which is the key
+// the document is validated with. The file package uses it to find keys produced by placeholders, see KeyRedactor.
+func KeyText(key any) string {
+	return fmt.Sprint(key)
+}
+
 // number formats a number of the validator like in JSON, e.g. 1.5 instead of 3/2
 func number(n *big.Rat) string {
 	if n.IsInt() {
@@ -199,6 +294,12 @@ func number(n *big.Rat) string {
 	}
 	f, _ := n.Float64()
 	return strconv.FormatFloat(f, 'g', -1, 64)
+}
+
+// Decode decodes the documents of the content of a file of the type like the validator does, see Schema.Validate.
+// The file package uses it to find the keys of the input, which are shown in violations, see KeyRedactor.
+func Decode(fileType general.FileType, data []byte) ([]any, error) {
+	return decode(fileType, data)
 }
 
 // decode decodes the documents of the content into the values the validator expects: maps with string keys, slices,
@@ -343,7 +444,7 @@ func normalize(value any) any {
 	case map[any]any:
 		converted := make(map[string]any, len(v))
 		for key, item := range v {
-			converted[fmt.Sprint(key)] = normalize(item)
+			converted[KeyText(key)] = normalize(item)
 		}
 		return converted
 	case []any:
